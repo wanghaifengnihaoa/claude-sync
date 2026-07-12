@@ -16,14 +16,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import * as readline from 'node:readline';
 import { readConfig } from './lib/config.js';
-import { pushWorkflow, pullWorkflow } from './lib/workflow.js';
+import { prompt, promptYesNo } from './lib/prompt.js';
+import { pushWorkflow, pullWorkflow, readSettings, extractMcpServers, countMemoryTopics } from './lib/workflow.js';
 import { createRcloneBackend } from './backends/rclone.js';
 import { createManualBackend } from './backends/manual.js';
 import { createBaidupcsBackend } from './backends/baidupcs.js';
 import { createCustomBackend } from './backends/custom.js';
-import { readManifest, hashFile } from './lib/sync.js';
+import { readManifest, hashFile, readPluginVersions } from './lib/sync.js';
+import { detectSkills } from './lib/detect.js';
 
 const KNOWN_COMMANDS = ['push', 'pull', 'init', 'status', 'diff', 'restore', 'help'];
 
@@ -110,13 +111,7 @@ function createBackend(config) {
   }
 }
 
-function rlPrompt(rl, question) {
-  if (!process.stdin.isTTY) return Promise.resolve('');
-  return new Promise(resolve => rl.question(question, resolve));
-}
-
 async function runInit(config) {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   console.log('╔══════════════════════════════════╗');
   console.log('║   claude-sync — interactive init ║');
   console.log('╚══════════════════════════════════╝');
@@ -128,7 +123,7 @@ async function runInit(config) {
   console.log('  2. baidupcs  — Baidu Netdisk (China users)');
   console.log('  3. manual    — No CLI needed, handle files yourself (iCloud)');
   console.log('  4. custom    — Your own upload/download commands');
-  const backendChoice = await rlPrompt(rl, `Backend [${config.BACKEND}]: `);
+  const backendChoice = await prompt(`Backend [${config.BACKEND}]: `);
   const backend = backendChoice.trim() || config.BACKEND;
   const finalConfig = { ...config, BACKEND: backend };
 
@@ -141,18 +136,18 @@ async function runInit(config) {
       const remotes = await rcloneBackend.listRemotes();
       if (remotes.length > 0) {
         console.log(`  Found: ${remotes.join(', ')}`);
-        const chosen = await rlPrompt(rl, `Remote name [${remotes[0]}]: `);
+        const chosen = await prompt(`Remote name [${remotes[0]}]: `);
         const remoteName = chosen.trim() || remotes[0];
-        const folder = await rlPrompt(rl, 'Folder path on remote [claude-sync/]: ');
+        const folder = await prompt('Folder path on remote [claude-sync/]: ');
         finalConfig.REMOTE = `${remoteName}:${folder.trim() || 'claude-sync/'}`;
       } else {
         console.log('  No remotes configured. Run: rclone config');
-        const manualRemote = await rlPrompt(rl, 'Or enter REMOTE manually (e.g. gdrive:claude-sync/): ');
+        const manualRemote = await prompt('Or enter REMOTE manually (e.g. gdrive:claude-sync/): ');
         if (manualRemote.trim()) finalConfig.REMOTE = manualRemote.trim();
       }
     } catch {
       console.log('  rclone not found. Install: https://rclone.org/install/');
-      const manualRemote = await rlPrompt(rl, 'Enter REMOTE manually: ');
+      const manualRemote = await prompt('Enter REMOTE manually: ');
       if (manualRemote.trim()) finalConfig.REMOTE = manualRemote.trim();
     }
   } else if (backend === 'baidupcs') {
@@ -165,12 +160,12 @@ async function runInit(config) {
     } catch {
       console.log('  BaiduPCS-Go not found. Install: https://github.com/qjfoidnh/BaiduPCS-Go');
     }
-    const path = await rlPrompt(rl, 'Remote folder path [/claude-sync]: ');
+    const path = await prompt('Remote folder path [/claude-sync]: ');
     finalConfig.REMOTE = path.trim() || '/claude-sync';
   } else if (backend === 'custom') {
-    const upCmd = await rlPrompt(rl, 'Upload command ({file}=local, {remote}=dest): ');
+    const upCmd = await prompt('Upload command ({file}=local, {remote}=dest): ');
     if (upCmd.trim()) finalConfig.UPLOAD_CMD = upCmd.trim();
-    const downCmd = await rlPrompt(rl, 'Download command ({remote}=source, {file}=local): ');
+    const downCmd = await prompt('Download command ({remote}=source, {file}=local): ');
     if (downCmd.trim()) finalConfig.DOWNLOAD_CMD = downCmd.trim();
   }
 
@@ -179,17 +174,15 @@ async function runInit(config) {
   const hostname = os.hostname();
   if (/^(MacBook|Mac|iMac|Macmini|MacPro|MacStudio)/.test(hostname) || hostname === 'localhost') {
     console.log(`Detected common hostname: "${hostname}" — recommend custom name to avoid conflicts.`);
-    const customName = await rlPrompt(rl, `Machine ID [${hostname}]: `);
+    const customName = await prompt(`Machine ID [${hostname}]: `);
     if (customName.trim()) finalConfig.MACHINE_ID = customName.trim();
   }
 
   // 4. Secrets mode
-  const secChoice = await rlPrompt(rl, `Secrets mode: keep (transmit as-is) or strip (replace with ***)? [${config.SECRETS}]: `);
+  const secChoice = await prompt(`Secrets mode: keep (transmit as-is) or strip (replace with ***)? [${config.SECRETS}]: `);
   if (secChoice.trim() === 'strip' || secChoice.trim() === 'keep') {
     finalConfig.SECRETS = secChoice.trim();
   }
-
-  rl.close();
 
   // 5. Detect CLAUDE.md location
   const homeClaudeMd = path.join(path.dirname(finalConfig.CLAUDE_DIR), 'CLAUDE.md');
@@ -199,7 +192,7 @@ async function runInit(config) {
   if (fs.existsSync(claudeDirMd)) console.log(`  Found: ~/.claude/CLAUDE.md`);
 
   // 6. Save config
-  const configPath = path.join(os.homedir(), '.claude-sync.json');
+  const configPath = path.join((config.HOME || os.homedir()), '.claude-sync.json');
   const toSave = { REMOTE: finalConfig.REMOTE, BACKEND: finalConfig.BACKEND, SECRETS: finalConfig.SECRETS, MACHINE_ID: finalConfig.MACHINE_ID };
   if (finalConfig.UPLOAD_CMD) toSave.UPLOAD_CMD = finalConfig.UPLOAD_CMD;
   if (finalConfig.DOWNLOAD_CMD) toSave.DOWNLOAD_CMD = finalConfig.DOWNLOAD_CMD;
@@ -273,43 +266,159 @@ async function runStatus(config, backend) {
     console.log(`Source user: ${manifest.source_user}`);
     console.log();
 
-    // Compare files
-    console.log('Files in remote:');
-    for (const [file, hash] of Object.entries(manifest.hashes || {})) {
-      const localPath = path.join(config.CLAUDE_DIR, file);
-      const exists = fs.existsSync(localPath) ? '✓' : '✗';
-      console.log(`  ${exists} ${file}`);
-    }
+    // === File comparison ===
+    console.log('── Files ──');
+    const allFileNames = new Set([
+      ...Object.keys(manifest.hashes || {}),
+      // Check local files that match manifest patterns
+    ]);
 
-    // Compare plugins
-    if (manifest.plugins && Object.keys(manifest.plugins).length > 0) {
-      console.log();
-      console.log('Plugins in remote:');
-      for (const [name, version] of Object.entries(manifest.plugins)) {
-        console.log(`  - ${name}@${version}`);
+    for (const [file, remoteHash] of Object.entries(manifest.hashes || {})) {
+      // Map CLAUDE manifest names back to local paths
+      let localPath;
+      if (file === 'CLAUDE_home.md') {
+        localPath = path.join((config.HOME || os.homedir()), 'CLAUDE.md');
+      } else if (file === 'CLAUDE_claude.md') {
+        localPath = path.join(config.CLAUDE_DIR, 'CLAUDE.md');
+      } else {
+        localPath = path.join(config.CLAUDE_DIR, file);
+      }
+
+      if (fs.existsSync(localPath)) {
+        const localHash = hashFile(localPath);
+        const status = localHash === remoteHash ? '  ' : '~ ';
+        console.log(`${status}${file}`);
+      } else {
+        console.log(`+  ${file} (remote only)`);
       }
     }
 
-    // Compare skills
-    const allSkills = [
-      ...(manifest.skills?.skills_sh || []).map(s => ({ ...s, kind: 'skills.sh' })),
-      ...(manifest.skills?.git || []).map(s => ({ ...s, kind: 'git' })),
-      ...(manifest.skills?.symlink || []).map(s => ({ ...s, kind: 'symlink' })),
-      ...(manifest.skills?.child_symlink || []).map(s => ({ ...s, kind: 'child symlink' })),
-      ...(manifest.skills?.plain || []).map(s => ({ ...s, kind: 'plain' }))
-    ];
-
-    if (allSkills.length > 0) {
-      console.log();
-      console.log('Skills in remote:');
-      for (const skill of allSkills) {
-        console.log(`  - ${skill.name} (${skill.kind})`);
+    // Check for files present locally but not in manifest
+    for (const localFile of ['settings.json', 'settings.local.json', 'keybindings.json']) {
+      if (manifest.hashes && !manifest.hashes[localFile]) {
+        const localPath = path.join(config.CLAUDE_DIR, localFile);
+        if (fs.existsSync(localPath)) {
+          console.log(`-  ${localFile} (local only)`);
+        }
       }
     }
 
+    if (Object.keys(manifest.hashes || {}).length === 0) {
+      console.log('  (no files tracked)');
+    }
+
+    // === Plugin comparison ===
+    console.log();
+    console.log('── Plugins ──');
+    const localPlugins = readPluginVersions(path.join(config.CLAUDE_DIR, 'plugins'));
+    const allPluginNames = new Set([
+      ...Object.keys(manifest.plugins || {}),
+      ...Object.keys(localPlugins)
+    ]);
+
+    if (allPluginNames.size === 0) {
+      console.log('  (no plugins)');
+    } else {
+      for (const name of [...allPluginNames].sort()) {
+        const localVer = localPlugins[name];
+        const remoteVer = manifest.plugins?.[name];
+        if (!localVer) {
+          console.log(`+  ${name}@${remoteVer} (remote only)`);
+        } else if (!remoteVer) {
+          console.log(`-  ${name}@${localVer} (local only)`);
+        } else if (localVer === remoteVer) {
+          console.log(`   ${name}@${localVer}`);
+        } else {
+          console.log(`~  ${name}: local=${localVer} remote=${remoteVer}`);
+        }
+      }
+    }
+
+    // === Skill comparison ===
+    console.log();
+    console.log('── Skills ──');
+    const localSkills = detectSkills(path.join(config.CLAUDE_DIR, 'skills'), path.join(config.HOME || os.homedir(), '.agents'));
+    const allSkillTypes = ['skills_sh', 'git', 'symlink', 'child_symlink', 'plain'];
+
+    let skillCount = 0;
+    for (const type of allSkillTypes) {
+      for (const skill of (manifest.skills?.[type] || [])) {
+        skillCount++;
+        const localSkill = localSkills.find(s =>
+          s.name === skill.name && typeOfSkill(s) === type
+        );
+        if (!localSkill) {
+          console.log(`+  ${skill.name} (${type}, remote only)`);
+        } else {
+          // Check if content differs
+          let changed = false;
+          if (type === 'git' && localSkill.commit !== skill.commit) changed = true;
+          if (type === 'skills_sh' && localSkill.folderHash !== skill.folderHash) changed = true;
+          if (type === 'plain' && localSkill.hash !== skill.hash) changed = true;
+          console.log(`${changed ? '~ ' : '  '}${skill.name} (${type})${changed ? ' — changed' : ''}`);
+        }
+      }
+    }
+    // Show locally-only skills
+    for (const localSkill of localSkills) {
+      const type = typeOfSkill(localSkill);
+      const inManifest = (manifest.skills?.[type] || []).some(s => s.name === localSkill.name);
+      if (!inManifest) {
+        console.log(`-  ${localSkill.name} (${type}, local only)`);
+        skillCount++;
+      }
+    }
+    if (skillCount === 0) console.log('  (no skills)');
+
+    // === mcpServers comparison ===
+    console.log();
+    console.log('── MCP Servers ──');
+    const localMcp = extractMcpServers(config.HOME || os.homedir()).names;
+    const remoteMcp = manifest.mcp_servers || [];
+    const allMcp = new Set([...localMcp, ...remoteMcp]);
+
+    if (allMcp.size === 0) {
+      console.log('  (no mcpServers)');
+    } else {
+      for (const name of [...allMcp].sort()) {
+        if (!localMcp.includes(name)) {
+          console.log(`+  ${name} (remote only)`);
+        } else if (!remoteMcp.includes(name)) {
+          console.log(`-  ${name} (local only)`);
+        } else {
+          console.log(`   ${name}`);
+        }
+      }
+    }
+
+    // === Memory comparison ===
+    console.log();
+    console.log('── Memory ──');
     if (manifest.memory) {
-      console.log();
-      console.log(`Memory: ${manifest.memory.topic_count} topics at ${manifest.memory.auto_memory_directory}`);
+      const settings = readSettings(config.CLAUDE_DIR);
+      const localAutoMemDir = settings?.autoMemoryDirectory;
+      const localTopics = localAutoMemDir
+        ? countMemoryTopics(localAutoMemDir.replace(/^~/, (config.HOME || os.homedir())))
+        : null;
+
+      if (localTopics !== null) {
+        const diff = manifest.memory.topic_count - localTopics;
+        const status = diff === 0 ? '  ' : '~ ';
+        console.log(`${status}auto memory: ${manifest.memory.auto_memory_directory}`);
+        console.log(`   remote: ${manifest.memory.topic_count} topics, local: ${localTopics} topics`);
+      } else {
+        console.log(`+  auto memory: ${manifest.memory.auto_memory_directory} (remote only)`);
+        console.log(`   ${manifest.memory.topic_count} topics (not enabled locally)`);
+      }
+    } else {
+      const settings = readSettings(config.CLAUDE_DIR);
+      const localAutoMemDir = settings?.autoMemoryDirectory;
+      if (localAutoMemDir) {
+        const localTopics = countMemoryTopics(localAutoMemDir.replace(/^~/, (config.HOME || os.homedir())));
+        console.log(`-  auto memory: ${localAutoMemDir} (local only, ${localTopics} topics)`);
+      } else {
+        console.log('  (no memory configured)');
+      }
     }
 
     // Clean up temp file
@@ -321,32 +430,73 @@ async function runStatus(config, backend) {
   }
 }
 
+function typeOfSkill(skill) {
+  return skill.type || 'plain';
+}
+
 async function runDiff(config, backend) {
   console.log('Diff: detailed comparison with remote...');
   console.log();
 
   try {
-    if (config.BACKEND === 'manual') {
-      console.log('Manual backend: place manifest.json and bundle.tar.gz in', config.BUNDLE_DIR);
-      return;
-    }
-
     const bundleDir = config.BUNDLE_DIR;
     if (!fs.existsSync(bundleDir)) fs.mkdirSync(bundleDir, { recursive: true });
 
-    // Download manifest
-    const tmpManifest = path.join(bundleDir, 'diff-manifest.json');
-    await backend.download(`${config.REMOTE}/manifest.json`, tmpManifest);
-    const manifest = readManifest(tmpManifest);
+    let manifest;
+
+    if (config.BACKEND === 'manual') {
+      // Read manifest directly from BUNDLE_DIR (user places files there)
+      const localManifest = path.join(bundleDir, 'manifest.json');
+      if (!fs.existsSync(localManifest)) {
+        console.log(`Manual backend: place manifest.json (and optionally bundle.tar.gz) in ${bundleDir}`);
+        console.log('Then run diff again.');
+        return;
+      }
+      manifest = readManifest(localManifest);
+    } else {
+      // Download manifest from remote
+      const tmpManifest = path.join(bundleDir, 'diff-manifest.json');
+      await backend.download(`${config.REMOTE}/manifest.json`, tmpManifest);
+      manifest = readManifest(tmpManifest);
+      try { fs.unlinkSync(tmpManifest); } catch {}
+    }
 
     if (!manifest) {
       console.log('No remote data found. Push first from source machine.');
       return;
     }
 
+    // Download the full bundle (needed for extracting individual files for diff)
+    let bundleDownloaded = false;
+    let tmpBundle, tmpExtract;
+    const neededForDiff = Object.entries(manifest.hashes || {}).some(([file, remoteHash]) => {
+      const localPath = mapManifestFileToLocal(file, config);
+      return fs.existsSync(localPath);
+    });
+
+    if (neededForDiff) {
+      tmpBundle = config.BACKEND === 'manual'
+        ? path.join(bundleDir, 'bundle.tar.gz')
+        : path.join(bundleDir, 'diff-bundle.tar.gz');
+      tmpExtract = path.join(bundleDir, 'diff-extract');
+      try {
+        if (config.BACKEND !== 'manual') {
+          await backend.download(`${config.REMOTE}/bundle.tar.gz`, tmpBundle);
+        }
+        const { extractBundle } = await import('./lib/sync.js');
+        if (fs.existsSync(tmpExtract)) fs.rmSync(tmpExtract, { recursive: true, force: true });
+        fs.mkdirSync(tmpExtract, { recursive: true });
+        await extractBundle(tmpBundle, tmpExtract);
+        bundleDownloaded = true;
+      } catch {
+        console.log('(Could not download bundle for line-by-line diff; showing hash comparisons only)');
+        console.log();
+      }
+    }
+
     // Compare each file hash
     for (const [file, remoteHash] of Object.entries(manifest.hashes || {})) {
-      const localPath = path.join(config.CLAUDE_DIR, file);
+      const localPath = mapManifestFileToLocal(file, config);
       const exists = fs.existsSync(localPath);
 
       if (!exists) {
@@ -356,32 +506,44 @@ async function runDiff(config, backend) {
 
       const localHash = hashFile(localPath);
       if (localHash !== remoteHash) {
-        console.log(`--- ${file} (diff) ---`);
+        console.log(`--- ${displayNameForManifestFile(file)} (diff) ---`);
 
         // For JSON files, show field-level diff
         if (file.endsWith('.json')) {
           try {
             const localData = JSON.parse(fs.readFileSync(localPath, 'utf-8'));
-            // Download and extract just this file from bundle for comparison
-            const tmpBundle = path.join(bundleDir, 'diff-bundle.tar.gz');
-            await backend.download(`${config.REMOTE}/bundle.tar.gz`, tmpBundle);
-
-            const { extractBundle } = await import('./lib/sync.js');
-            const tmpExtract = path.join(bundleDir, 'diff-extract');
-            if (fs.existsSync(tmpExtract)) fs.rmSync(tmpExtract, { recursive: true, force: true });
-            fs.mkdirSync(tmpExtract, { recursive: true });
-            await extractBundle(tmpBundle, tmpExtract);
-
-            const remotePath = path.join(tmpExtract, file);
-            if (fs.existsSync(remotePath)) {
-              const remoteData = JSON.parse(fs.readFileSync(remotePath, 'utf-8'));
-              diffJson(localData, remoteData, '');
+            if (bundleDownloaded) {
+              const remotePath = path.join(tmpExtract, file);
+              if (fs.existsSync(remotePath)) {
+                const remoteData = JSON.parse(fs.readFileSync(remotePath, 'utf-8'));
+                diffJson(localData, remoteData, '');
+              } else {
+                console.log(`  <remote file not in bundle>`);
+              }
+            } else {
+              console.log(`  JSON differs: local=${localHash.substring(0, 8)} remote=${remoteHash.substring(0, 8)}`);
             }
-
-            try { fs.rmSync(tmpExtract, { recursive: true, force: true }); } catch {}
-            try { fs.unlinkSync(tmpBundle); } catch {}
           } catch {
-            console.log(`  <binary or unreadable — hash differs: local=${localHash.substring(0,8)} remote=${remoteHash.substring(0,8)}>`);
+            console.log(`  <unparseable — hash differs: local=${localHash.substring(0,8)} remote=${remoteHash.substring(0,8)}>`);
+          }
+        } else if (file.endsWith('.md')) {
+          // For markdown/text files, show line-by-line diff
+          try {
+            const localLines = fs.readFileSync(localPath, 'utf-8').split('\n');
+            let remoteLines = [];
+            if (bundleDownloaded) {
+              const remotePath = path.join(tmpExtract, file);
+              if (fs.existsSync(remotePath)) {
+                remoteLines = fs.readFileSync(remotePath, 'utf-8').split('\n');
+              }
+            }
+            if (remoteLines.length > 0) {
+              diffLines(localLines, remoteLines);
+            } else {
+              console.log(`  Content differs: local=${localHash.substring(0, 8)} remote=${remoteHash.substring(0, 8)}`);
+            }
+          } catch {
+            console.log(`  <unreadable — hash differs: local=${localHash.substring(0,8)} remote=${remoteHash.substring(0,8)}>`);
           }
         } else {
           console.log(`  Content differs: local=${localHash.substring(0,8)} remote=${remoteHash.substring(0,8)}`);
@@ -393,10 +555,26 @@ async function runDiff(config, backend) {
     if (manifest.skills) {
       console.log();
       console.log('--- Skills ---');
+      const localSkills = detectSkills(path.join(config.CLAUDE_DIR, 'skills'), path.join(config.HOME || os.homedir(), '.agents'));
       const allTypes = ['skills_sh', 'git', 'symlink', 'child_symlink', 'plain'];
       for (const type of allTypes) {
         for (const skill of (manifest.skills[type] || [])) {
-          console.log(`  ${type}: ${skill.name} (remote)`);
+          const local = localSkills.find(s => s.name === skill.name && typeOfSkill(s) === type);
+          if (!local) {
+            console.log(`  + ${type}: ${skill.name} (remote only)`);
+          } else {
+            let changed = false;
+            if (type === 'git' && local.commit !== skill.commit) changed = true;
+            if (type === 'skills_sh' && local.folderHash !== skill.folderHash) changed = true;
+            console.log(`  ${changed ? '~' : ' '} ${type}: ${skill.name}${changed ? ' (changed)' : ''}`);
+          }
+        }
+      }
+      for (const localSkill of localSkills) {
+        const type = typeOfSkill(localSkill);
+        const inManifest = (manifest.skills?.[type] || []).some(s => s.name === localSkill.name);
+        if (!inManifest) {
+          console.log(`  - ${type}: ${localSkill.name} (local only)`);
         }
       }
     }
@@ -404,25 +582,86 @@ async function runDiff(config, backend) {
     // Plugin differences
     if (manifest.plugins && Object.keys(manifest.plugins).length > 0) {
       console.log();
-      console.log('--- Plugins (remote) ---');
+      console.log('--- Plugins ---');
+      const localPlugins = readPluginVersions(path.join(config.CLAUDE_DIR, 'plugins'));
       for (const [name, ver] of Object.entries(manifest.plugins)) {
-        const localPluginsPath = path.join(config.CLAUDE_DIR, 'plugins', 'installed_plugins.json');
-        let localVer = '(not installed)';
-        if (fs.existsSync(localPluginsPath)) {
-          try {
-            const local = JSON.parse(fs.readFileSync(localPluginsPath, 'utf-8'));
-            localVer = local[name] || '(not installed)';
-          } catch {}
+        const localVer = localPlugins[name];
+        if (!localVer) {
+          console.log(`  + ${name}@${ver} (remote only)`);
+        } else if (localVer !== ver) {
+          console.log(`  ~ ${name}: local=${localVer} remote=${ver}`);
+        } else {
+          console.log(`    ${name}@${ver}`);
         }
-        const status = localVer === ver ? '=' : (localVer === '(not installed)' ? '+' : '~');
-        console.log(`  ${status} ${name}: local=${localVer} remote=${ver}`);
+      }
+      for (const [name, ver] of Object.entries(localPlugins)) {
+        if (!manifest.plugins[name]) {
+          console.log(`  - ${name}@${ver} (local only)`);
+        }
       }
     }
 
-    try { fs.unlinkSync(tmpManifest); } catch {}
+    // Clean up temp files (don't delete user-placed files in manual mode)
+    if (bundleDownloaded) {
+      try { fs.rmSync(tmpExtract, { recursive: true, force: true }); } catch {}
+      if (config.BACKEND !== 'manual') {
+        try { fs.unlinkSync(tmpBundle); } catch {}
+      }
+    }
 
   } catch (e) {
     console.log('Cannot connect to remote:', e.message);
+  }
+}
+
+function mapManifestFileToLocal(file, config) {
+  if (file === 'CLAUDE_home.md') {
+    return path.join((config.HOME || os.homedir()), 'CLAUDE.md');
+  }
+  if (file === 'CLAUDE_claude.md') {
+    return path.join(config.CLAUDE_DIR, 'CLAUDE.md');
+  }
+  return path.join(config.CLAUDE_DIR, file);
+}
+
+function displayNameForManifestFile(file) {
+  if (file === 'CLAUDE_home.md') return '~/CLAUDE.md';
+  if (file === 'CLAUDE_claude.md') return '~/.claude/CLAUDE.md';
+  return file;
+}
+
+function diffLines(localLines, remoteLines) {
+  const maxLen = Math.max(localLines.length, remoteLines.length);
+  // Simple unified-diff-style output
+  let contextLines = 0;
+  let inDiff = false;
+
+  for (let i = 0; i < maxLen; i++) {
+    const l = i < localLines.length ? localLines[i] : undefined;
+    const r = i < remoteLines.length ? remoteLines[i] : undefined;
+
+    if (l === r) {
+      contextLines++;
+      if (inDiff && contextLines <= 2) {
+        console.log(`    ${l || ''}`);
+      } else if (contextLines > 2) {
+        inDiff = false;
+      }
+    } else {
+      if (!inDiff) {
+        if (contextLines > 0) console.log('    ...');
+        contextLines = 0;
+        inDiff = true;
+      }
+      if (l !== undefined && r !== undefined) {
+        console.log(`  - ${l}`);
+        console.log(`  + ${r}`);
+      } else if (r !== undefined) {
+        console.log(`  + ${r}`);
+      } else if (l !== undefined) {
+        console.log(`  - ${l}`);
+      }
+    }
   }
 }
 
@@ -449,7 +688,7 @@ function diffJson(local, remote, prefix) {
 
 function runRestore(flags, config) {
   // Use home derived from CLAUDE_DIR (consistent with pull backup location)
-  const home = path.dirname(config?.CLAUDE_DIR || path.join(os.homedir(), '.claude'));
+  const home = (config.HOME || os.homedir());
 
   if (flags.list) {
     console.log('Available backups:');

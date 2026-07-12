@@ -15,6 +15,24 @@ describe('classifySkill', () => {
     expect(result.source).toBe('github.com/user/my-skill');
   });
 
+  it('extracts folderHash from skillsLock entry when available', () => {
+    const skillsLock = {
+      skills: [{ name: 'my-skill', source: 'github.com/user/my-skill', skillFolderHash: 'abc123def' }]
+    };
+
+    const result = classifySkill('my-skill', '/fake/path/skills/my-skill', skillsLock);
+    expect(result.folderHash).toBe('abc123def');
+  });
+
+  it('folderHash is empty string when not in skillsLock entry', () => {
+    const skillsLock = {
+      skills: [{ name: 'my-skill', source: 'github.com/user/my-skill' }]
+    };
+
+    const result = classifySkill('my-skill', '/fake/path/skills/my-skill', skillsLock);
+    expect(result.folderHash).toBe('');
+  });
+
   it('classifies as git when directory has .git subdirectory', () => {
     const skillsLock = { skills: [] };
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-sync-test-'));

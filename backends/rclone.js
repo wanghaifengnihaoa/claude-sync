@@ -10,7 +10,7 @@ import { withRetry } from '../lib/retry.js';
 const execFileAsync = promisify(execFile);
 
 export function createRcloneBackend(execFn) {
-  const run = execFn || defaultExec;
+  const run = execFn || ((cmd, args) => execFileAsync(cmd, args));
 
   return {
     async upload(filePath, remote) {
@@ -52,8 +52,4 @@ export function createRcloneBackend(execFn) {
       }
     }
   };
-}
-
-async function defaultExec(cmd, args) {
-  return execFileAsync(cmd, args);
 }

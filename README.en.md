@@ -11,7 +11,7 @@ Cross-machine sync tool for [Claude Code](https://claude.ai/code) configurations
 ## Features
 
 - **Pluggable backends** — rclone (40+ cloud drives), Baidu Netdisk, iCloud/manual, custom commands
-- **Secret handling** — `keep` (encrypted in transit via your cloud) or `strip` (`***` placeholders)
+- **Secret handling** — `keep` (transmitted as-is; your cloud provider encrypts transport) or `strip` (`***` placeholders)
 - **Smart merging** — `--cover` (full sync) or `--keep` (only fill gaps). Never blindly overwrites.
 - **Auto-detection** — 5 skill types recognized: skills.sh, git repos, symlinks, child symlinks, plain
 - **Cross-platform** — macOS, Linux, Windows. Paths translated between machines.

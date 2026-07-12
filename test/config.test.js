@@ -30,4 +30,26 @@ describe('readConfig', () => {
     expect(config.SECRETS).toBe('keep');
     expect(config.REMOTE).toBeUndefined();
   });
+
+  it('expands ~ in BUNDLE_DIR and CLAUDE_DIR to absolute paths', () => {
+    const userConfig = {
+      BUNDLE_DIR: '~/my-bundle',
+      CLAUDE_DIR: '~/.claude'
+    };
+    const config = readConfig(userConfig);
+    expect(config.BUNDLE_DIR).not.toContain('~');
+    expect(config.BUNDLE_DIR).toContain('my-bundle');
+    expect(config.CLAUDE_DIR).not.toContain('~');
+    expect(config.CLAUDE_DIR).toContain('.claude');
+  });
+
+  it('does not modify absolute paths', () => {
+    const userConfig = {
+      BUNDLE_DIR: '/tmp/my-bundle',
+      CLAUDE_DIR: '/home/user/.claude'
+    };
+    const config = readConfig(userConfig);
+    expect(config.BUNDLE_DIR).toBe('/tmp/my-bundle');
+    expect(config.CLAUDE_DIR).toBe('/home/user/.claude');
+  });
 });

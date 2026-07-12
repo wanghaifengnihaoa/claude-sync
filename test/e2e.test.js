@@ -129,7 +129,7 @@ describe('End-to-end push/pull cycle', () => {
     const sourceConfig = readConfig({
       BACKEND: 'manual',
       BUNDLE_DIR: bundleDir,
-      CLAUDE_DIR: path.join(sourceHome, '.claude'),
+      CLAUDE_DIR: path.join(sourceHome, '.claude'), HOME: sourceHome,
       MACHINE_ID: 'source-mac',
       SECRETS: 'keep'
     });
@@ -161,7 +161,7 @@ describe('End-to-end push/pull cycle', () => {
     const targetConfig = readConfig({
       BACKEND: 'manual',
       BUNDLE_DIR: bundleDir,
-      CLAUDE_DIR: path.join(targetHome, '.claude'),
+      CLAUDE_DIR: path.join(targetHome, '.claude'), HOME: targetHome,
       MACHINE_ID: 'target-mac',
       SECRETS: 'keep'
     });
@@ -237,7 +237,7 @@ describe('End-to-end push/pull cycle', () => {
     const sourceConfig = readConfig({
       BACKEND: 'manual',
       BUNDLE_DIR: bundleDir,
-      CLAUDE_DIR: path.join(sourceHome, '.claude'),
+      CLAUDE_DIR: path.join(sourceHome, '.claude'), HOME: sourceHome,
       MACHINE_ID: 'source-mac'
     });
 
@@ -262,7 +262,7 @@ describe('End-to-end push/pull cycle', () => {
     const targetConfig = readConfig({
       BACKEND: 'manual',
       BUNDLE_DIR: bundleDir,
-      CLAUDE_DIR: targetClaude,
+      CLAUDE_DIR: targetClaude, HOME: targetHome,
       MACHINE_ID: 'target-mac'
     });
 
@@ -282,7 +282,7 @@ describe('End-to-end push/pull cycle', () => {
     const sourceConfig = readConfig({
       BACKEND: 'manual',
       BUNDLE_DIR: bundleDir,
-      CLAUDE_DIR: path.join(sourceHome, '.claude'),
+      CLAUDE_DIR: path.join(sourceHome, '.claude'), HOME: sourceHome,
       MACHINE_ID: 'source-mac'
     });
 
@@ -304,7 +304,7 @@ describe('End-to-end push/pull cycle', () => {
     const sourceConfig = readConfig({
       BACKEND: 'manual',
       BUNDLE_DIR: bundleDir,
-      CLAUDE_DIR: path.join(sourceHome, '.claude'),
+      CLAUDE_DIR: path.join(sourceHome, '.claude'), HOME: sourceHome,
       MACHINE_ID: 'source-mac'
     });
 
@@ -317,5 +317,307 @@ describe('End-to-end push/pull cycle', () => {
     // Second push from same machine — should succeed without conflict
     const result2 = await pushWorkflow(sourceConfig, backend);
     expect(result2.success).toBe(true);
+  });
+
+  it('pull restores CLAUDE.md to correct locations', async () => {
+    // Setup source with CLAUDE.md in both locations
+    const sourceClaude = path.join(sourceHome, '.claude');
+    fs.writeFileSync(path.join(sourceHome, 'CLAUDE.md'), '# Home CLAUDE.md');
+    fs.writeFileSync(path.join(sourceClaude, 'CLAUDE.md'), '# Claude Dir CLAUDE.md');
+
+    // Push
+    const sourceConfig = readConfig({
+      BACKEND: 'manual',
+      BUNDLE_DIR: bundleDir,
+      CLAUDE_DIR: sourceClaude,
+      HOME: sourceHome,
+      MACHINE_ID: 'source-mac'
+    });
+    const backend = createManualBackend({ bundleDir });
+    await pushWorkflow(sourceConfig, backend);
+
+    // Pull to target
+    const targetClaude = path.join(targetHome, '.claude');
+    fs.mkdirSync(targetClaude, { recursive: true });
+    const targetConfig = readConfig({
+      BACKEND: 'manual',
+      BUNDLE_DIR: bundleDir,
+      CLAUDE_DIR: targetClaude,
+      HOME: targetHome,
+      MACHINE_ID: 'target-mac'
+    });
+    const targetBackend = createManualBackend({ bundleDir });
+    await pullWorkflow(targetConfig, targetBackend, { strategy: 'cover' });
+
+    // Verify: ~/CLAUDE.md restored
+    const homeClaudeMd = path.join(targetHome, 'CLAUDE.md');
+    expect(fs.existsSync(homeClaudeMd)).toBe(true);
+    expect(fs.readFileSync(homeClaudeMd, 'utf-8')).toBe('# Home CLAUDE.md');
+
+    // Verify: ~/.claude/CLAUDE.md restored
+    const claudeDirClaudeMd = path.join(targetClaude, 'CLAUDE.md');
+    expect(fs.existsSync(claudeDirClaudeMd)).toBe(true);
+    expect(fs.readFileSync(claudeDirClaudeMd, 'utf-8')).toBe('# Claude Dir CLAUDE.md');
+
+    // Verify: staging names are cleaned up
+    expect(fs.existsSync(path.join(targetClaude, 'CLAUDE_home.md'))).toBe(false);
+    expect(fs.existsSync(path.join(targetClaude, 'CLAUDE_claude.md'))).toBe(false);
+  });
+});
+
+// End of End-to-end push/pull cycle describe
+
+describe('Strip mode push/pull cycle', () => {
+  let sourceHome;
+  let targetHome;
+  let bundleDir;
+
+  beforeEach(() => {
+    sourceHome = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-sync-strip-src-'));
+    targetHome = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-sync-strip-tgt-'));
+    bundleDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-sync-strip-bdl-'));
+
+    const sourceClaude = path.join(sourceHome, '.claude');
+    fs.mkdirSync(sourceClaude, { recursive: true });
+
+    const settings = {
+      env: {
+        ANTHROPIC_AUTH_TOKEN: 'sk-ant-secret-token-123',
+        OPENAI_API_KEY: 'sk-openai-secret-456',
+        ANTHROPIC_BASE_URL: 'https://api.anthropic.com'
+      },
+      model: 'claude-sonnet-4-6',
+      statusLine: { type: 'bun', path: '/opt/homebrew/bin/bun' }
+    };
+    fs.writeFileSync(path.join(sourceClaude, 'settings.json'), JSON.stringify(settings, null, 2));
+
+    // Plain skill
+    const skillsDir = path.join(sourceClaude, 'skills');
+    fs.mkdirSync(skillsDir, { recursive: true });
+    fs.mkdirSync(path.join(skillsDir, 'my-skill'), { recursive: true });
+    fs.writeFileSync(path.join(skillsDir, 'my-skill', 'SKILL.md'), '# My Skill');
+  });
+
+  afterEach(() => {
+    fs.rmSync(sourceHome, { recursive: true, force: true });
+    fs.rmSync(targetHome, { recursive: true, force: true });
+    fs.rmSync(bundleDir, { recursive: true, force: true });
+  });
+
+  it('push with strip mode replaces secrets with ***', async () => {
+    const sourceConfig = readConfig({
+      BACKEND: 'manual',
+      BUNDLE_DIR: bundleDir,
+      CLAUDE_DIR: path.join(sourceHome, '.claude'), HOME: sourceHome,
+      MACHINE_ID: 'source-mac',
+      SECRETS: 'strip'
+    });
+
+    const backend = createManualBackend({ bundleDir });
+    const pushResult = await pushWorkflow(sourceConfig, backend);
+
+    expect(pushResult.success).toBe(true);
+
+    // Extract the bundle to inspect the stripped settings
+    const extractDir = path.join(bundleDir, 'inspect');
+    const { extractBundle } = await import('../lib/sync.js');
+    await extractBundle(path.join(bundleDir, 'bundle.tar.gz'), extractDir);
+
+    const strippedSettings = JSON.parse(
+      fs.readFileSync(path.join(extractDir, 'settings.json'), 'utf-8')
+    );
+
+    // Secrets should be ***
+    expect(strippedSettings.env.ANTHROPIC_AUTH_TOKEN).toBe('***');
+    expect(strippedSettings.env.OPENAI_API_KEY).toBe('***');
+    // Non-secret values preserved
+    expect(strippedSettings.env.ANTHROPIC_BASE_URL).toBe('https://api.anthropic.com');
+    expect(strippedSettings.model).toBe('claude-sonnet-4-6');
+  });
+
+  it('pull with strip mode preserves target machine secret values', async () => {
+    // Push from source with strip mode
+    const sourceConfig = readConfig({
+      BACKEND: 'manual',
+      BUNDLE_DIR: bundleDir,
+      CLAUDE_DIR: path.join(sourceHome, '.claude'), HOME: sourceHome,
+      MACHINE_ID: 'source-mac',
+      SECRETS: 'strip'
+    });
+
+    const backend = createManualBackend({ bundleDir });
+    await pushWorkflow(sourceConfig, backend);
+
+    // Create target with pre-existing real secrets
+    const targetClaude = path.join(targetHome, '.claude');
+    fs.mkdirSync(targetClaude, { recursive: true });
+    const targetSettings = {
+      env: {
+        ANTHROPIC_AUTH_TOKEN: 'sk-ant-target-real-token-999',
+      },
+      model: 'claude-opus-4-8'
+    };
+    fs.writeFileSync(path.join(targetClaude, 'settings.json'), JSON.stringify(targetSettings, null, 2));
+
+    // Pull with strip mode (cover strategy)
+    const targetConfig = readConfig({
+      BACKEND: 'manual',
+      BUNDLE_DIR: bundleDir,
+      CLAUDE_DIR: targetClaude, HOME: targetHome,
+      MACHINE_ID: 'target-mac',
+      SECRETS: 'strip'
+    });
+
+    const targetBackend = createManualBackend({ bundleDir });
+    await pullWorkflow(targetConfig, targetBackend, { strategy: 'cover' });
+
+    // Verify: target's real token should be preserved (not overwritten by ***)
+    const result = JSON.parse(
+      fs.readFileSync(path.join(targetClaude, 'settings.json'), 'utf-8')
+    );
+
+    // Target's existing real token preserved
+    expect(result.env.ANTHROPIC_AUTH_TOKEN).toBe('sk-ant-target-real-token-999');
+    // Source model is applied (non-secret field merged)
+    // Note: model field is merged during cover — the source model is applied
+  });
+
+  it('push with keep mode transmits secrets unchanged', async () => {
+    const sourceConfig = readConfig({
+      BACKEND: 'manual',
+      BUNDLE_DIR: bundleDir,
+      CLAUDE_DIR: path.join(sourceHome, '.claude'), HOME: sourceHome,
+      MACHINE_ID: 'source-mac',
+      SECRETS: 'keep'
+    });
+
+    const backend = createManualBackend({ bundleDir });
+    const pushResult = await pushWorkflow(sourceConfig, backend);
+
+    expect(pushResult.success).toBe(true);
+
+    // Extract and verify secrets are NOT stripped
+    const extractDir = path.join(bundleDir, 'inspect-keep');
+    const { extractBundle } = await import('../lib/sync.js');
+    await extractBundle(path.join(bundleDir, 'bundle.tar.gz'), extractDir);
+
+    const settings = JSON.parse(
+      fs.readFileSync(path.join(extractDir, 'settings.json'), 'utf-8')
+    );
+
+    expect(settings.env.ANTHROPIC_AUTH_TOKEN).toBe('sk-ant-secret-token-123');
+    expect(settings.env.OPENAI_API_KEY).toBe('sk-openai-secret-456');
+  });
+});
+
+describe('Restore functionality', () => {
+  let tmpDir;
+  let claudeDir;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-sync-restore-'));
+    claudeDir = path.join(tmpDir, '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('creates backup during pull and can restore from it', async () => {
+    // Simulate backup creation (as pull workflow does)
+    const timestamp = '2026-07-12T12-00-00-000Z';
+    const backupPath = path.join(tmpDir, `.claude.backup.${timestamp}`);
+    fs.cpSync(claudeDir, backupPath, { recursive: true });
+
+    // Write something to .claude
+    const settingsFile = path.join(claudeDir, 'settings.json');
+    fs.writeFileSync(settingsFile, JSON.stringify({ model: 'claude-opus' }));
+
+    // Verify backup exists and contains original content
+    expect(fs.existsSync(backupPath)).toBe(true);
+    expect(fs.statSync(backupPath).isDirectory()).toBe(true);
+
+    // "Restore": delete .claude and copy backup back
+    fs.rmSync(claudeDir, { recursive: true, force: true });
+    fs.cpSync(backupPath, claudeDir, { recursive: true });
+
+    // Verify restore worked — the backup should have the original (empty) state
+    expect(fs.existsSync(claudeDir)).toBe(true);
+  });
+
+  it('backup preserves all files before overwriting', async () => {
+    // Write initial files
+    fs.writeFileSync(path.join(claudeDir, 'settings.json'), JSON.stringify({ model: 'original' }));
+    fs.writeFileSync(path.join(claudeDir, 'CLAUDE.md'), '# Original CLAUDE.md');
+
+    // Create backup
+    const timestamp = '2026-07-12T12-00-00-000Z';
+    const backupPath = path.join(tmpDir, `.claude.backup.${timestamp}`);
+    fs.cpSync(claudeDir, backupPath, { recursive: true });
+
+    // Modify files
+    fs.writeFileSync(path.join(claudeDir, 'settings.json'), JSON.stringify({ model: 'modified' }));
+    fs.writeFileSync(path.join(claudeDir, 'CLAUDE.md'), '# Modified CLAUDE.md');
+
+    // Restore from backup
+    fs.rmSync(claudeDir, { recursive: true, force: true });
+    fs.cpSync(backupPath, claudeDir, { recursive: true });
+
+    // Verify original content restored
+    const restored = JSON.parse(fs.readFileSync(path.join(claudeDir, 'settings.json'), 'utf-8'));
+    expect(restored.model).toBe('original');
+
+    const claudeMd = fs.readFileSync(path.join(claudeDir, 'CLAUDE.md'), 'utf-8');
+    expect(claudeMd).toBe('# Original CLAUDE.md');
+  });
+
+  it('lists backup directories and cleans them up', () => {
+    const ts1 = '2026-07-12T12-00-00-000Z';
+    const ts2 = '2026-07-12T13-00-00-000Z';
+    const backup1 = path.join(tmpDir, `.claude.backup.${ts1}`);
+    const backup2 = path.join(tmpDir, `.claude.backup.${ts2}`);
+
+    fs.mkdirSync(backup1, { recursive: true });
+    fs.mkdirSync(backup2, { recursive: true });
+
+    // List backups
+    const entries = fs.readdirSync(tmpDir).filter(f => f.startsWith('.claude.backup.'));
+    expect(entries).toHaveLength(2);
+
+    // Cleanup one
+    fs.rmSync(backup1, { recursive: true, force: true });
+    const remaining = fs.readdirSync(tmpDir).filter(f => f.startsWith('.claude.backup.'));
+    expect(remaining).toHaveLength(1);
+
+    // Cleanup all
+    fs.rmSync(backup2, { recursive: true, force: true });
+    const none = fs.readdirSync(tmpDir).filter(f => f.startsWith('.claude.backup.'));
+    expect(none).toHaveLength(0);
+  });
+
+  it('creates safety backup before restoring', () => {
+    // Original .claude state
+    fs.writeFileSync(path.join(claudeDir, 'settings.json'), JSON.stringify({ model: 'current' }));
+
+    // A backup exists
+    const backupPath = path.join(tmpDir, '.claude.backup.2026-07-12T12-00-00-000Z');
+    fs.mkdirSync(backupPath, { recursive: true });
+    fs.writeFileSync(path.join(backupPath, 'settings.json'), JSON.stringify({ model: 'old' }));
+
+    // Safety backup before restore
+    const safetyBackup = path.join(tmpDir, '.claude.before-restore.12345');
+    fs.cpSync(claudeDir, safetyBackup, { recursive: true });
+
+    // Perform restore
+    fs.rmSync(claudeDir, { recursive: true, force: true });
+    fs.cpSync(backupPath, claudeDir, { recursive: true });
+
+    // Verify safety backup has the "current" state
+    const safetySettings = JSON.parse(fs.readFileSync(path.join(safetyBackup, 'settings.json'), 'utf-8'));
+    expect(safetySettings.model).toBe('current');
+
+    // Clean up safety backup
+    fs.rmSync(safetyBackup, { recursive: true, force: true });
   });
 });

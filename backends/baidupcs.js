@@ -10,7 +10,7 @@ import { withRetry } from '../lib/retry.js';
 const execFileAsync = promisify(execFile);
 
 export function createBaidupcsBackend(execFn) {
-  const run = execFn || defaultExec;
+  const run = execFn || ((cmd, args) => execFileAsync(cmd, args));
 
   return {
     async upload(filePath, remoteDir) {
@@ -48,8 +48,4 @@ export function createBaidupcsBackend(execFn) {
       }
     }
   };
-}
-
-async function defaultExec(cmd, args) {
-  return execFileAsync(cmd, args);
 }

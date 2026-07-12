@@ -22,7 +22,7 @@ export function createCustomBackend(config) {
       await withRetry(
         async () => {
           try {
-            const cmd = uploadCmd.replace(/\{file\}/g, filePath).replace(/\{remote\}/g, remote);
+            const cmd = uploadCmd.replace(/\{file\}/g, shellEscape(filePath)).replace(/\{remote\}/g, shellEscape(remote));
             await execAsync(cmd);
             log('verbose', `Custom upload: ${cmd}`);
           } catch (e) {
@@ -40,7 +40,7 @@ export function createCustomBackend(config) {
       await withRetry(
         async () => {
           try {
-            const cmd = downloadCmd.replace(/\{remote\}/g, remote).replace(/\{file\}/g, filePath);
+            const cmd = downloadCmd.replace(/\{remote\}/g, shellEscape(remote)).replace(/\{file\}/g, shellEscape(filePath));
             await execAsync(cmd);
             log('verbose', `Custom download: ${cmd}`);
           } catch (e) {
@@ -51,4 +51,12 @@ export function createCustomBackend(config) {
       );
     }
   };
+}
+
+/**
+ * Escape a value for safe use in a shell command (single-quote wrapping).
+ * Replaces embedded single quotes with '\'' (end quote, escaped quote, restart quote).
+ */
+function shellEscape(val) {
+  return `'${String(val).replace(/'/g, "'\\''")}'`;
 }
