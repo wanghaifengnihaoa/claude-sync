@@ -20,7 +20,7 @@ Claude Code 跨机器配置同步工具。
 ## 快速开始
 
 ```bash
-npm install -g claude-sync
+npm install -g @whfnihaoa/claude-sync
 
 # 主力机上
 claude-sync init     # 交互式配置（选后端 + 填远程路径）

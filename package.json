@@ -1,12 +1,24 @@
 {
-  "name": "claude-sync",
+  "name": "@whfnihaoa/claude-sync",
   "version": "1.0.0",
-  "description": "Cross-machine sync tool for Claude Code configurations",
+  "description": "Claude Code 跨机器配置同步工具",
   "main": "claude-sync.js",
   "bin": {
     "claude-sync": "./claude-sync.js"
   },
   "type": "module",
+  "files": [
+    "claude-sync.js",
+    "lib/",
+    "backends/",
+    "claude-sync.conf.example",
+    "README.md",
+    "README.en.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wanghaifengnihaoa/claude-sync"
+  },
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest"
@@ -15,10 +27,15 @@
     "claude-code",
     "sync",
     "cross-machine",
-    "config"
+    "config",
+    "claude",
+    "anthropic"
   ],
   "author": "",
   "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
   "devDependencies": {
     "vitest": "^3.0.0"
   },

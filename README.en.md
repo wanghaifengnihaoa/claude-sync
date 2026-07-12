@@ -20,7 +20,7 @@ Cross-machine sync tool for [Claude Code](https://claude.ai/code) configurations
 ## Quick Start
 
 ```bash
-npm install -g claude-sync
+npm install -g @whfnihaoa/claude-sync
 
 # On your main machine
 claude-sync init     # pick backend + remote (interactive)
