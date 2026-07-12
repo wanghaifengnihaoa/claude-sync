@@ -1,0 +1,9 @@
+{
+  "REMOTE": "myremote:claude-sync/",
+  "BACKEND": "rclone",
+  "SECRETS": "keep",
+  "MACHINE_ID": "my-macbook",
+  "EXCLUDE": "",
+  "BUNDLE_DIR": "~/.claude-sync-bundle",
+  "CLAUDE_DIR": "~/.claude"
+}

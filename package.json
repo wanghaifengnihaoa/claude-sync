@@ -1,0 +1,28 @@
+{
+  "name": "claude-sync",
+  "version": "1.0.0",
+  "description": "Cross-machine sync tool for Claude Code configurations",
+  "main": "claude-sync.js",
+  "bin": {
+    "claude-sync": "./claude-sync.js"
+  },
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [
+    "claude-code",
+    "sync",
+    "cross-machine",
+    "config"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "vitest": "^3.0.0"
+  },
+  "dependencies": {
+    "tar": "^7.5.20"
+  }
+}
