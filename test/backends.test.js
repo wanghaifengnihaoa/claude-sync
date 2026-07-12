@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { createRcloneBackend } from '../backends/rclone.js';
 import { createManualBackend } from '../backends/manual.js';
 import { createBaidupcsBackend } from '../backends/baidupcs.js';
-import { createCustomBackend } from '../backends/custom.js';
+import { createCustomBackend, shellEscape } from '../backends/custom.js';
 
 // Helper to create a backend with a fake exec for testing
 function fakeExec(responses) {
@@ -211,25 +211,38 @@ describe('baidupcs backend', () => {
 // custom backend
 // ==============================
 describe('custom backend', () => {
-  it('upload substitutes {file} and {remote} in command', async () => {
+  it('upload substitutes {file} and {remote} and calls injected execFn', async () => {
     let executedCmd = '';
     const exec = async (cmd) => {
       executedCmd = cmd;
       return { stdout: '', stderr: '' };
     };
 
-    // We need to inject execFn — custom.js uses import-level exec
-    // which we can't easily mock. Instead verify that config is accepted.
     const backend = createCustomBackend({
       UPLOAD_CMD: 'scp {file} user@host:{remote}',
       DOWNLOAD_CMD: ''
-    });
+    }, exec);
 
-    // Can't easily test cmd execution due to import-level exec binding
-    // but verify it's callable
-    expect(backend).toBeDefined();
-    expect(typeof backend.upload).toBe('function');
-    expect(typeof backend.download).toBe('function');
+    await backend.upload('/tmp/my file.tar.gz', '/remote/path');
+    expect(executedCmd).toContain('scp ');
+    expect(executedCmd).toContain('user@host:');
+  });
+
+  it('download substitutes {remote} and {file} and calls injected execFn', async () => {
+    let executedCmd = '';
+    const exec = async (cmd) => {
+      executedCmd = cmd;
+      return { stdout: '', stderr: '' };
+    };
+
+    const backend = createCustomBackend({
+      UPLOAD_CMD: '',
+      DOWNLOAD_CMD: 'wget {remote} -O {file}'
+    }, exec);
+
+    await backend.download('https://example.com/bundle.tar.gz', '/tmp/out.tar.gz');
+    expect(executedCmd).toContain('wget ');
+    expect(executedCmd).toContain('-O ');
   });
 
   it('upload throws when UPLOAD_CMD is not configured', async () => {
@@ -246,14 +259,14 @@ describe('custom backend', () => {
     ).rejects.toThrow('DOWNLOAD_CMD not configured');
   });
 
-  it('shellEscape handles values with single quotes', () => {
-    // Import shellEscape to test directly
-    // Since shellEscape is not exported, we verify that the backend
-    // doesn't crash with special characters in paths via integration
-    const backend = createCustomBackend({
-      UPLOAD_CMD: 'echo {file}',
-      DOWNLOAD_CMD: 'echo {remote}'
-    });
-    expect(backend).toBeDefined();
+  it('shellEscape prevents command injection via $(), backticks, and quotes', () => {
+    const r1 = shellEscape('$(whoami)');
+    expect(r1).toContain('\\$');
+    const r2 = shellEscape('`rm -rf /`');
+    expect(r2).toContain('\\`');
+    const r3 = shellEscape('test"evil');
+    expect(r3).toContain('\\"');
+    const r4 = shellEscape("it's a test");
+    expect(r4).toContain("\\'");
   });
 });

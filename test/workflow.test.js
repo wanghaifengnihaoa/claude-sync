@@ -11,7 +11,8 @@ import {
   applyPathReplacement,
   resolveSymlinksInDir,
   checkStatusLinePaths,
-  copyDirContents
+  copyDirContents,
+  handlePlugins
 } from '../lib/workflow.js';
 
 // ==============================
@@ -347,5 +348,62 @@ describe('checkStatusLinePaths', () => {
     const settings = { statusLine: { type: 'default' } };
     fs.writeFileSync(path.join(tmpDir, 'settings.json'), JSON.stringify(settings));
     expect(() => checkStatusLinePaths(tmpDir)).not.toThrow();
+  });
+});
+
+describe('handlePlugins', () => {
+  let claudeDir;
+
+  beforeEach(() => {
+    claudeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-sync-plugins-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(claudeDir, { recursive: true, force: true });
+  });
+
+  it('processes plugins when no claude CLI is available (graceful failure)', async () => {
+    // CC format with existing plugin
+    const pluginsDir = path.join(claudeDir, 'plugins');
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    const initialPlugins = {
+      version: 2,
+      plugins: {
+        'existing-plugin@official': [{ version: '1.0.0', installedAt: '2026-01-01T00:00:00Z' }]
+      }
+    };
+    fs.writeFileSync(path.join(pluginsDir, 'installed_plugins.json'), JSON.stringify(initialPlugins));
+
+    // Try to install new plugins and update existing ones
+    const manifestPlugins = {
+      'existing-plugin': '2.0.0',  // needs update
+      'new-plugin': '1.5.0'         // needs install
+    };
+
+    // Should not throw even though claude CLI doesn't exist
+    await expect(
+      handlePlugins(manifestPlugins, claudeDir, 'cover')
+    ).resolves.toBeUndefined();
+  });
+
+  it('handles keep strategy—only installs missing, does not update', async () => {
+    const pluginsDir = path.join(claudeDir, 'plugins');
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    const initialPlugins = {
+      version: 2,
+      plugins: {
+        'existing-plugin@official': [{ version: '1.0.0', installedAt: '2026-01-01T00:00:00Z' }]
+      }
+    };
+    fs.writeFileSync(path.join(pluginsDir, 'installed_plugins.json'), JSON.stringify(initialPlugins));
+
+    const manifestPlugins = {
+      'existing-plugin': '2.0.0',  // different version, but keep strategy → skip
+      'new-plugin': '1.5.0'
+    };
+
+    await expect(
+      handlePlugins(manifestPlugins, claudeDir, 'keep')
+    ).resolves.toBeUndefined();
   });
 });

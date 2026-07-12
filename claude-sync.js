@@ -516,7 +516,7 @@ async function runDiff(config, backend) {
               const remotePath = path.join(tmpExtract, file);
               if (fs.existsSync(remotePath)) {
                 const remoteData = JSON.parse(fs.readFileSync(remotePath, 'utf-8'));
-                diffJson(localData, remoteData, '');
+                diffJson(localData, remoteData, '', config.SECRETS);
               } else {
                 console.log(`  <remote file not in bundle>`);
               }
@@ -665,23 +665,24 @@ function diffLines(localLines, remoteLines) {
   }
 }
 
-function diffJson(local, remote, prefix) {
+function diffJson(local, remote, prefix, secretsMode = 'keep') {
   const allKeys = new Set([...Object.keys(local || {}), ...Object.keys(remote || {})]);
   for (const key of allKeys) {
-    const path = prefix ? `${prefix}.${key}` : key;
+    const keyPath = prefix ? `${prefix}.${key}` : key;
     const lv = local?.[key];
     const rv = remote?.[key];
 
     if (lv === undefined) {
-      console.log(`  + ${path}: ${JSON.stringify(rv)}`);
+      console.log(`  + ${keyPath}: ${JSON.stringify(rv)}`);
     } else if (rv === undefined) {
-      console.log(`  - ${path}: ${JSON.stringify(lv)}`);
+      console.log(`  - ${keyPath}: ${JSON.stringify(lv)}`);
     } else if (typeof lv === 'object' && typeof rv === 'object' && lv !== null && rv !== null) {
-      diffJson(lv, rv, path);
+      diffJson(lv, rv, keyPath, secretsMode);
     } else if (JSON.stringify(lv) !== JSON.stringify(rv)) {
-      const lvDisplay = typeof lv === 'string' && (lv.length > 40 || lv.includes('sk-')) ? '***' : JSON.stringify(lv);
-      const rvDisplay = typeof rv === 'string' && (rv.length > 40 || rv.includes('sk-')) ? '***' : JSON.stringify(rv);
-      console.log(`  ~ ${path}: local=${lvDisplay} remote=${rvDisplay}`);
+      const shouldMask = secretsMode === 'strip';
+      const lvDisplay = shouldMask && typeof lv === 'string' && (lv.length > 40 || lv.includes('sk-')) ? '***' : JSON.stringify(lv);
+      const rvDisplay = shouldMask && typeof rv === 'string' && (rv.length > 40 || rv.includes('sk-')) ? '***' : JSON.stringify(rv);
+      console.log(`  ~ ${keyPath}: local=${lvDisplay} remote=${rvDisplay}`);
     }
   }
 }
@@ -806,12 +807,29 @@ export async function main(argv) {
   }
 }
 
+import { fileURLToPath } from 'node:url';
+
+/**
+ * Check whether this module is being run as the main entry point.
+ * Handles both direct execution and global npm installs (symlinks).
+ */
+export function isMainCheck(argv1, metaUrl) {
+  if (!argv1) return false;
+  // Global npm install creates a symlink: process.argv[1] ends with 'claude-sync'
+  if (path.basename(argv1) === 'claude-sync') return true;
+  try {
+    // Resolve both paths to their real locations for symlink-aware comparison
+    const realArgv = fs.realpathSync(argv1);
+    const realSelf = fs.realpathSync(fileURLToPath(metaUrl));
+    return realArgv === realSelf;
+  } catch {
+    // Fallback: compare basenames
+    return path.basename(argv1) === path.basename(fileURLToPath(metaUrl));
+  }
+}
+
 // Run if called directly (also works when installed globally via npm)
-const isMain = process.argv[1] && (
-  import.meta.url.endsWith(process.argv[1].replace(/^.*[\\/]/, '')) ||
-  process.argv[1].endsWith('claude-sync')
-);
-if (isMain) {
+if (isMainCheck(process.argv[1], import.meta.url)) {
   main(process.argv).catch(err => {
     console.error('Error:', err.message);
     process.exit(1);

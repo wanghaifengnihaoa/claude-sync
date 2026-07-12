@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { parseArgs } from '../claude-sync.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import { parseArgs, isMainCheck } from '../claude-sync.js';
 
 describe('parseArgs', () => {
   it('parses push command', () => {
@@ -67,5 +70,26 @@ describe('parseArgs', () => {
   it('handles unknown commands gracefully', () => {
     const result = parseArgs(['node', 'claude-sync.js', 'unknown-cmd']);
     expect(result.command).toBe('unknown-cmd');
+  });
+});
+
+describe('isMainCheck', () => {
+  it('returns false when argv1 is undefined', () => {
+    expect(isMainCheck(undefined, import.meta.url)).toBe(false);
+  });
+
+  it('returns true when argv1 basename is claude-sync', () => {
+    expect(isMainCheck('/usr/local/bin/claude-sync', import.meta.url)).toBe(true);
+  });
+
+  it('returns true when argv1 resolves to the same file as metaUrl', () => {
+    // For the currently running file, this should be true
+    const realPath = fs.realpathSync(process.argv[1]);
+    // Use a metaUrl that resolves to the same file
+    expect(isMainCheck(realPath, `file://${realPath}`)).toBe(true);
+  });
+
+  it('returns false for a different file', () => {
+    expect(isMainCheck('/usr/local/bin/some-other-tool', import.meta.url)).toBe(false);
   });
 });

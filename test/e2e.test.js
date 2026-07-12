@@ -224,6 +224,12 @@ describe('End-to-end push/pull cycle', () => {
     expect(targetPlugins['my-plugin']).toBe('1.0.0');
     expect(targetPlugins['another-plugin']).toBe('2.3.1');
 
+    // 6b. known_marketplaces.json restored
+    const targetMarketplaces = JSON.parse(
+      fs.readFileSync(path.join(targetHome, '.claude', 'plugins', 'known_marketplaces.json'), 'utf-8')
+    );
+    expect(targetMarketplaces.official).toBe('https://cli.claude.ai/marketplace');
+
     // 7. Backup exists
     expect(fs.existsSync(pullResult.backup)).toBe(true);
 
@@ -480,6 +486,67 @@ describe('Strip mode push/pull cycle', () => {
     expect(result.env.ANTHROPIC_AUTH_TOKEN).toBe('sk-ant-target-real-token-999');
     // Source model is applied (non-secret field merged)
     // Note: model field is merged during cover — the source model is applied
+  });
+
+  it('cover mode preserves settings.local.json env values in strip mode', async () => {
+    // Setup source with settings.local.json containing env secrets
+    const sourceClaude = path.join(sourceHome, '.claude');
+    fs.writeFileSync(
+      path.join(sourceClaude, 'settings.local.json'),
+      JSON.stringify({
+        env: { CUSTOM_API_KEY: 'sk-custom-source-secret', MY_TOKEN: 'src-token-123' },
+        theme: 'dark',
+        fontSize: 14
+      }, null, 2)
+    );
+
+    // Push with strip mode
+    const sourceConfig = readConfig({
+      BACKEND: 'manual',
+      BUNDLE_DIR: bundleDir,
+      CLAUDE_DIR: sourceClaude, HOME: sourceHome,
+      MACHINE_ID: 'source-mac',
+      SECRETS: 'strip'
+    });
+    const backend = createManualBackend({ bundleDir });
+    await pushWorkflow(sourceConfig, backend);
+
+    // Create target with pre-existing settings.local.json (has its own env values)
+    const targetClaude = path.join(targetHome, '.claude');
+    fs.mkdirSync(targetClaude, { recursive: true });
+    // target settings.json (so pull doesn't fail)
+    fs.writeFileSync(
+      path.join(targetClaude, 'settings.json'),
+      JSON.stringify({ model: 'claude-opus-4-8' }, null, 2)
+    );
+    fs.writeFileSync(
+      path.join(targetClaude, 'settings.local.json'),
+      JSON.stringify({
+        env: { CUSTOM_API_KEY: 'sk-custom-target-real', MY_TOKEN: 'target-token-456' },
+        theme: 'light',
+        extraSetting: true
+      }, null, 2)
+    );
+
+    // Pull with cover strategy
+    const targetConfig = readConfig({
+      BACKEND: 'manual',
+      BUNDLE_DIR: bundleDir,
+      CLAUDE_DIR: targetClaude, HOME: targetHome,
+      MACHINE_ID: 'target-mac',
+      SECRETS: 'strip'
+    });
+    const targetBackend = createManualBackend({ bundleDir });
+    await pullWorkflow(targetConfig, targetBackend, { strategy: 'cover' });
+
+    // Verify settings.local.json on target
+    const result = JSON.parse(
+      fs.readFileSync(path.join(targetClaude, 'settings.local.json'), 'utf-8')
+    );
+
+    // Target's real env values should be preserved (not overwritten by *** from source)
+    expect(result.env.CUSTOM_API_KEY).toBe('sk-custom-target-real');
+    expect(result.env.MY_TOKEN).toBe('target-token-456');
   });
 
   it('push with keep mode transmits secrets unchanged', async () => {

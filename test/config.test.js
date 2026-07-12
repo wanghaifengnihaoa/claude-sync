@@ -52,4 +52,28 @@ describe('readConfig', () => {
     expect(config.BUNDLE_DIR).toBe('/tmp/my-bundle');
     expect(config.CLAUDE_DIR).toBe('/home/user/.claude');
   });
+
+  it('parses EXCLUDE string into array', () => {
+    const config = readConfig({ EXCLUDE: 'commands, agents' });
+    expect(Array.isArray(config.EXCLUDE)).toBe(true);
+    expect(config.EXCLUDE).toEqual(['commands', 'agents']);
+  });
+
+  it('handles EXCLUDE as space-separated string', () => {
+    const config = readConfig({ EXCLUDE: 'commands agents hooks' });
+    expect(Array.isArray(config.EXCLUDE)).toBe(true);
+    expect(config.EXCLUDE).toEqual(['commands', 'agents', 'hooks']);
+  });
+
+  it('keeps EXCLUDE as array when already an array', () => {
+    const config = readConfig({ EXCLUDE: ['custom-dir'] });
+    expect(Array.isArray(config.EXCLUDE)).toBe(true);
+    expect(config.EXCLUDE).toEqual(['custom-dir']);
+  });
+
+  it('defaults EXCLUDE to empty array', () => {
+    const config = readConfig({});
+    expect(Array.isArray(config.EXCLUDE)).toBe(true);
+    expect(config.EXCLUDE).toEqual([]);
+  });
 });

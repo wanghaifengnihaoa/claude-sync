@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { createManifest, buildBundle, readManifest } from '../lib/sync.js';
+import { createManifest, buildBundle, readManifest, extractBundle } from '../lib/sync.js';
 
 describe('createManifest', () => {
   it('creates a manifest with required fields', () => {
@@ -71,18 +71,62 @@ describe('buildBundle', () => {
     expect(stat.size).toBeGreaterThan(0);
   });
 
-  it('creates a valid tar.gz that can be read back', async () => {
+  it('excludes nested plugin caches and marketplaces', async () => {
     const sourceDir = path.join(tmpDir, 'source');
-    fs.mkdirSync(sourceDir, { recursive: true });
-    fs.writeFileSync(path.join(sourceDir, 'test.txt'), 'hello world');
+    fs.mkdirSync(path.join(sourceDir, 'plugins', 'cache'), { recursive: true });
+    fs.mkdirSync(path.join(sourceDir, 'plugins', 'marketplaces'), { recursive: true });
+    fs.mkdirSync(path.join(sourceDir, 'sessions'), { recursive: true });
+    fs.mkdirSync(path.join(sourceDir, 'settings'), { recursive: true });
+    // Files that should be included
+    fs.writeFileSync(path.join(sourceDir, 'plugins', 'installed_plugins.json'), JSON.stringify({ plugins: {} }));
+    fs.writeFileSync(path.join(sourceDir, 'settings.json'), JSON.stringify({ model: 'claude' }));
+    // Files that should be excluded (nested under plugins/)
+    fs.writeFileSync(path.join(sourceDir, 'plugins', 'cache', 'cache-file'), 'cache-data');
+    fs.writeFileSync(path.join(sourceDir, 'plugins', 'marketplaces', 'index.json'), 'marketplace-data');
+    // Top-level excluded
+    fs.writeFileSync(path.join(sourceDir, 'sessions', 'session1.json'), 'session-data');
 
     const bundlePath = path.join(tmpDir, 'bundle.tar.gz');
     await buildBundle(sourceDir, bundlePath);
 
-    // Verify it's a valid gzip file
-    const content = fs.readFileSync(bundlePath);
-    expect(content[0]).toBe(0x1f); // gzip magic byte 1
-    expect(content[1]).toBe(0x8b); // gzip magic byte 2
+    // Extract to verify
+    const extractDir = path.join(tmpDir, 'extracted');
+    await extractBundle(bundlePath, extractDir);
+
+    // Should include these
+    expect(fs.existsSync(path.join(extractDir, 'settings.json'))).toBe(true);
+    expect(fs.existsSync(path.join(extractDir, 'plugins'))).toBe(true);
+    expect(fs.existsSync(path.join(extractDir, 'plugins', 'installed_plugins.json'))).toBe(true);
+
+    // Should exclude these (nested caches inside plugins/)
+    expect(fs.existsSync(path.join(extractDir, 'plugins', 'cache'))).toBe(false);
+    expect(fs.existsSync(path.join(extractDir, 'plugins', 'marketplaces'))).toBe(false);
+
+    // Should exclude top-level runtime dirs
+    expect(fs.existsSync(path.join(extractDir, 'sessions'))).toBe(false);
+  });
+
+  it('accepts additional exclude patterns', async () => {
+    const sourceDir = path.join(tmpDir, 'source');
+    fs.mkdirSync(path.join(sourceDir, 'commands'), { recursive: true });
+    fs.mkdirSync(path.join(sourceDir, 'agents'), { recursive: true });
+    fs.writeFileSync(path.join(sourceDir, 'settings.json'), JSON.stringify({ model: 'claude' }));
+    fs.writeFileSync(path.join(sourceDir, 'commands', 'my-cmd.md'), '# cmd');
+    fs.writeFileSync(path.join(sourceDir, 'agents', 'my-agent.md'), '# agent');
+
+    const bundlePath = path.join(tmpDir, 'bundle.tar.gz');
+    await buildBundle(sourceDir, bundlePath, ['commands']);
+
+    const extractDir = path.join(tmpDir, 'extracted');
+    await extractBundle(bundlePath, extractDir);
+
+    // Should include
+    expect(fs.existsSync(path.join(extractDir, 'settings.json'))).toBe(true);
+    expect(fs.existsSync(path.join(extractDir, 'agents'))).toBe(true);
+    expect(fs.existsSync(path.join(extractDir, 'agents', 'my-agent.md'))).toBe(true);
+
+    // Should exclude 'commands' (additional exclude)
+    expect(fs.existsSync(path.join(extractDir, 'commands'))).toBe(false);
   });
 });
 
