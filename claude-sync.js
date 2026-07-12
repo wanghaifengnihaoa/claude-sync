@@ -16,6 +16,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { readConfig } from './lib/config.js';
 import { prompt, promptYesNo } from './lib/prompt.js';
 import { pushWorkflow, pullWorkflow, readSettings, extractMcpServers, countMemoryTopics } from './lib/workflow.js';
@@ -806,8 +807,6 @@ export async function main(argv) {
       break;
   }
 }
-
-import { fileURLToPath } from 'node:url';
 
 /**
  * Check whether this module is being run as the main entry point.

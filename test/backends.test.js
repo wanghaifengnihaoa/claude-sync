@@ -259,14 +259,22 @@ describe('custom backend', () => {
     ).rejects.toThrow('DOWNLOAD_CMD not configured');
   });
 
-  it('shellEscape prevents command injection via $(), backticks, and quotes', () => {
+  it('shellEscape prevents command injection via single-quote wrapping', () => {
+    // Inside single quotes, no shell metacharacters are interpreted
     const r1 = shellEscape('$(whoami)');
-    expect(r1).toContain('\\$');
+    // The raw injection payload appears inside single quotes — shell won't execute it
+    expect(r1.startsWith("'")).toBe(true);
+    expect(r1.endsWith("'")).toBe(true);
+    expect(r1).toContain('$(whoami)');
+
+    // Backticks inside single quotes are also safe
     const r2 = shellEscape('`rm -rf /`');
-    expect(r2).toContain('\\`');
-    const r3 = shellEscape('test"evil');
-    expect(r3).toContain('\\"');
-    const r4 = shellEscape("it's a test");
-    expect(r4).toContain("\\'");
+    expect(r2.startsWith("'")).toBe(true);
+    expect(r2.endsWith("'")).toBe(true);
+
+    // Single quotes in values are escaped via '\'' idiom
+    const r3 = shellEscape("it's a test");
+    expect(r3).toContain("\\'");
+    expect(r3).toBe("'it'\\''s a test'");
   });
 });

@@ -61,16 +61,10 @@ export function createCustomBackend(config, execFn) {
 
 /**
  * Escape a value for safe use in a shell command (single-quote wrapping).
- * Replaces embedded single quotes with '\'' (end quote, escaped quote, restart quote).
- * Also escapes common injection vectors: $, backtick, ", backslash, newline.
+ * Inside single quotes, NO characters have special meaning except the single quote itself.
+ * The only required escaping: replace ' with '\'' (end quote, escaped quote, restart quote).
+ * Shell injection ($(), backticks, etc.) is impossible inside single quotes.
  */
 export function shellEscape(val) {
-  const s = String(val)
-    .replace(/\\/g, '\\\\')
-    .replace(/'/g, "'\\''")
-    .replace(/\$/g, '\\$')
-    .replace(/`/g, '\\`')
-    .replace(/"/g, '\\"')
-    .replace(/\n/g, '\\n');
-  return `'${s}'`;
+  return `'${String(val).replace(/'/g, "'\\''")}'`;
 }
