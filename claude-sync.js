@@ -567,8 +567,12 @@ export async function main(argv) {
   }
 }
 
-// Run if called directly
-if (process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/^.*[\\/]/, ''))) {
+// Run if called directly (also works when installed globally via npm)
+const isMain = process.argv[1] && (
+  import.meta.url.endsWith(process.argv[1].replace(/^.*[\\/]/, '')) ||
+  process.argv[1].endsWith('claude-sync')
+);
+if (isMain) {
   main(process.argv).catch(err => {
     console.error('Error:', err.message);
     process.exit(1);
