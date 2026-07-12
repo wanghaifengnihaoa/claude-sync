@@ -325,6 +325,89 @@ describe('End-to-end push/pull cycle', () => {
     expect(result2.success).toBe(true);
   });
 
+  it('push conflict detection blocks different machine without --force', async () => {
+    // Use a mock backend that simulates remote manifest access
+    let remoteManifest = null;
+    const mockBackend = {
+      async upload() { return true; },
+      async download(remote, localPath) {
+        if (remote.endsWith('manifest.json') && remoteManifest) {
+          fs.writeFileSync(localPath, JSON.stringify(remoteManifest));
+          return true;
+        }
+        throw new Error('not found');
+      }
+    };
+
+    // Push from machine A with mock backend (BACKEND != manual to trigger conflict detection)
+    const configA = readConfig({
+      BACKEND: 'rclone',
+      REMOTE: 'myremote:claude-sync',
+      BUNDLE_DIR: bundleDir,
+      CLAUDE_DIR: path.join(sourceHome, '.claude'), HOME: sourceHome,
+      MACHINE_ID: 'machine-a'
+    });
+    const resultA = await pushWorkflow(configA, mockBackend);
+    expect(resultA.success).toBe(true);
+    // Store the pushed manifest as remote state
+    const manifestPath = path.join(bundleDir, 'manifest.json');
+    if (fs.existsSync(manifestPath)) {
+      remoteManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+    }
+
+    // Push from machine B without --force — should detect conflict
+    const configB = readConfig({
+      BACKEND: 'rclone',
+      REMOTE: 'myremote:claude-sync',
+      BUNDLE_DIR: bundleDir,
+      CLAUDE_DIR: path.join(sourceHome, '.claude'), HOME: sourceHome,
+      MACHINE_ID: 'machine-b'
+    });
+    const resultB = await pushWorkflow(configB, mockBackend);
+    // Without --force, should detect conflict from different machine
+    expect(resultB.success).toBe(false);
+    expect(resultB.reason).toBe('conflict');
+  });
+
+  it('push with --force overrides conflict from different machine', async () => {
+    let remoteManifest = null;
+    const mockBackend = {
+      async upload() { return true; },
+      async download(remote, localPath) {
+        if (remote.endsWith('manifest.json') && remoteManifest) {
+          fs.writeFileSync(localPath, JSON.stringify(remoteManifest));
+          return true;
+        }
+        throw new Error('not found');
+      }
+    };
+
+    // Push from machine A
+    const configA = readConfig({
+      BACKEND: 'rclone',
+      REMOTE: 'myremote:claude-sync',
+      BUNDLE_DIR: bundleDir,
+      CLAUDE_DIR: path.join(sourceHome, '.claude'), HOME: sourceHome,
+      MACHINE_ID: 'machine-a'
+    });
+    await pushWorkflow(configA, mockBackend);
+    const manifestPath = path.join(bundleDir, 'manifest.json');
+    if (fs.existsSync(manifestPath)) {
+      remoteManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+    }
+
+    // Push from machine B with --force — should override
+    const configB = readConfig({
+      BACKEND: 'rclone',
+      REMOTE: 'myremote:claude-sync',
+      BUNDLE_DIR: bundleDir,
+      CLAUDE_DIR: path.join(sourceHome, '.claude'), HOME: sourceHome,
+      MACHINE_ID: 'machine-b'
+    });
+    const resultB = await pushWorkflow(configB, mockBackend, { force: true });
+    expect(resultB.success).toBe(true);
+  });
+
   it('pull restores CLAUDE.md to correct locations', async () => {
     // Setup source with CLAUDE.md in both locations
     const sourceClaude = path.join(sourceHome, '.claude');
