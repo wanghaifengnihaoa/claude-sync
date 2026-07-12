@@ -1,13 +1,14 @@
 /**
  * Custom backend for claude-sync.
  * Allows users to define their own upload/download commands in config.
+ * Uses shell exec to support quoted arguments and complex commands.
  */
 
-import { execFile } from 'node:child_process';
+import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import { withRetry, log } from '../lib/retry.js';
 
-const execFileAsync = promisify(execFile);
+const execAsync = promisify(exec);
 
 export function createCustomBackend(config) {
   const uploadCmd = config.UPLOAD_CMD || '';
@@ -21,9 +22,8 @@ export function createCustomBackend(config) {
       await withRetry(
         async () => {
           try {
-            const cmd = uploadCmd.replace('{file}', filePath).replace('{remote}', remote);
-            const [exe, ...args] = cmd.split(' ');
-            await execFileAsync(exe, args);
+            const cmd = uploadCmd.replace(/\{file\}/g, filePath).replace(/\{remote\}/g, remote);
+            await execAsync(cmd);
             log('verbose', `Custom upload: ${cmd}`);
           } catch (e) {
             throw new Error(`custom upload failed: ${e.message || e}`);
@@ -40,9 +40,8 @@ export function createCustomBackend(config) {
       await withRetry(
         async () => {
           try {
-            const cmd = downloadCmd.replace('{remote}', remote).replace('{file}', filePath);
-            const [exe, ...args] = cmd.split(' ');
-            await execFileAsync(exe, args);
+            const cmd = downloadCmd.replace(/\{remote\}/g, remote).replace(/\{file\}/g, filePath);
+            await execAsync(cmd);
             log('verbose', `Custom download: ${cmd}`);
           } catch (e) {
             throw new Error(`custom download failed: ${e.message || e}`);

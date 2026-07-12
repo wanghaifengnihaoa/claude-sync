@@ -562,7 +562,7 @@ export async function main(argv) {
       await runDiff(config, backend);
       break;
     case 'restore':
-      await runRestore(flags, config);
+      runRestore(flags, config);
       break;
   }
 }

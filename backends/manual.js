@@ -6,10 +6,11 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import os from 'node:os';
 
 export function createManualBackend({ copyFile, bundleDir } = {}) {
   const copy = copyFile || fs.copyFile;
-  const dir = bundleDir || path.join(process.env.HOME || '~', '.claude-sync-bundle');
+  const dir = bundleDir || path.join(os.homedir(), '.claude-sync-bundle');
 
   return {
     async upload(filePath, _remote) {
