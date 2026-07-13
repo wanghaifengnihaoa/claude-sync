@@ -18,6 +18,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { readConfig } from './lib/config.js';
+import { spawnSync } from 'node:child_process';
 import { prompt, promptYesNo, pickFromList } from './lib/prompt.js';
 import { pushWorkflow, pullWorkflow, readSettings, extractMcpServers, countMemoryTopics } from './lib/workflow.js';
 import { createRcloneBackend } from './backends/rclone.js';
@@ -163,10 +164,36 @@ async function runInit(config) {
   // 2. Configure REMOTE per backend
   if (backend === 'rclone') {
     console.log();
-    console.log('Checking rclone remotes...');
+    console.log('Checking rclone...');
     try {
       const rcloneBackend = createRcloneBackend();
-      const remotes = await rcloneBackend.listRemotes();
+      let remotes = await rcloneBackend.listRemotes();
+
+      // No remotes? Offer to run rclone config right here
+      while (remotes.length === 0) {
+        console.log('  No remotes configured yet.');
+        const doConfig = await promptYesNo('Run rclone config to set up a cloud drive now?', true);
+        if (doConfig) {
+          console.log();
+          console.log('  Starting rclone config (follow the prompts below)...');
+          console.log('  Tip: after adding a remote, type "q" to quit rclone config.');
+          console.log();
+          // rclone config is fully interactive — pass the terminal through
+          spawnSync('rclone', ['config'], { stdio: 'inherit' });
+          console.log();
+          // Refresh the remote list
+          try {
+            remotes = await rcloneBackend.listRemotes();
+          } catch {
+            console.log('  rclone error. Install: https://rclone.org/install/');
+            break;
+          }
+        } else {
+          console.log('  Skipping. You can run "rclone config" later and re-run init.');
+          break;
+        }
+      }
+
       if (remotes.length > 0) {
         const remoteName = await pickFromList(
           `Found ${remotes.length} remote(s):`,
@@ -176,8 +203,7 @@ async function runInit(config) {
         const folder = await prompt('Folder path on remote [claude-sync/]: ');
         finalConfig.REMOTE = `${remoteName}:${folder.trim() || 'claude-sync/'}`;
       } else {
-        console.log('  No remotes configured. Run: rclone config');
-        const manualRemote = await prompt('Or enter REMOTE manually (e.g. gdrive:claude-sync/): ');
+        const manualRemote = await prompt('Enter REMOTE manually (e.g. gdrive:claude-sync/): ');
         if (manualRemote.trim()) finalConfig.REMOTE = manualRemote.trim();
       }
     } catch {
@@ -190,8 +216,18 @@ async function runInit(config) {
     console.log('Checking BaiduPCS-Go...');
     try {
       const bpBackend = createBaidupcsBackend();
-      const loggedIn = await bpBackend.checkLogin();
-      console.log(`  ${loggedIn ? '✓ Logged in' : '✗ Not logged in — run: BaiduPCS-Go login'}`);
+      let loggedIn = await bpBackend.checkLogin();
+      console.log(`  ${loggedIn ? '✓ Logged in' : '✗ Not logged in'}`);
+      if (!loggedIn) {
+        const doLogin = await promptYesNo('Run BaiduPCS-Go login now?', true);
+        if (doLogin) {
+          console.log();
+          spawnSync('BaiduPCS-Go', ['login'], { stdio: 'inherit' });
+          console.log();
+          loggedIn = await bpBackend.checkLogin();
+          console.log(`  ${loggedIn ? '✓ Login successful' : '✗ Login failed — check your credentials'}`);
+        }
+      }
     } catch {
       console.log('  BaiduPCS-Go not found. Install: https://github.com/qjfoidnh/BaiduPCS-Go');
     }
