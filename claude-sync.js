@@ -18,7 +18,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { readConfig } from './lib/config.js';
-import { prompt, promptYesNo } from './lib/prompt.js';
+import { prompt, promptYesNo, pickFromList } from './lib/prompt.js';
 import { pushWorkflow, pullWorkflow, readSettings, extractMcpServers, countMemoryTopics } from './lib/workflow.js';
 import { createRcloneBackend } from './backends/rclone.js';
 import { createManualBackend } from './backends/manual.js';
@@ -162,9 +162,11 @@ async function runInit(config) {
       const rcloneBackend = createRcloneBackend();
       const remotes = await rcloneBackend.listRemotes();
       if (remotes.length > 0) {
-        console.log(`  Found: ${remotes.join(', ')}`);
-        const chosen = await prompt(`Remote name [${remotes[0]}]: `);
-        const remoteName = chosen.trim() || remotes[0];
+        const remoteName = await pickFromList(
+          `Found ${remotes.length} remote(s):`,
+          remotes,
+          remotes[0]
+        );
         const folder = await prompt('Folder path on remote [claude-sync/]: ');
         finalConfig.REMOTE = `${remoteName}:${folder.trim() || 'claude-sync/'}`;
       } else {
