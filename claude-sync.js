@@ -174,13 +174,7 @@ async function runInit(config) {
         console.log('  No remotes configured yet.');
         const doConfig = await promptYesNo('Run rclone config to set up a cloud drive now?', true);
         if (doConfig) {
-          console.log();
-          console.log('  Starting rclone config (follow the prompts below)...');
-          console.log('  Tip: after adding a remote, type "q" to quit rclone config.');
-          console.log();
-          // rclone config is fully interactive — pass the terminal through
           spawnSync('rclone', ['config'], { stdio: 'inherit' });
-          console.log();
           // Refresh the remote list
           try {
             remotes = await rcloneBackend.listRemotes();
@@ -221,9 +215,7 @@ async function runInit(config) {
       if (!loggedIn) {
         const doLogin = await promptYesNo('Run BaiduPCS-Go login now?', true);
         if (doLogin) {
-          console.log();
           spawnSync('BaiduPCS-Go', ['login'], { stdio: 'inherit' });
-          console.log();
           loggedIn = await bpBackend.checkLogin();
           console.log(`  ${loggedIn ? '✓ Login successful' : '✗ Login failed — check your credentials'}`);
         }
