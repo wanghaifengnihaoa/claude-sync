@@ -728,21 +728,29 @@ function diffJson(local, remote, prefix, secretsMode = 'keep') {
   }
 }
 
-function runRestore(flags, config) {
-  // Use home derived from CLAUDE_DIR (consistent with pull backup location)
+async function runRestore(flags, config) {
   const home = (config.HOME || os.homedir());
 
-  if (flags.list) {
-    console.log('Available backups:');
+  // Helper: list backup timestamps (sorted newest first)
+  const listBackups = () => {
     try {
-      const entries = fs.readdirSync(home).filter(f => f.startsWith('.claude.backup.'));
-      if (entries.length === 0) {
-        console.log('  (none)');
-      } else {
-        entries.forEach(e => console.log(`  ${e}`));
-      }
-    } catch (e) {
-      console.log('  Error reading backups:', e.message);
+      return fs.readdirSync(home)
+        .filter(f => f.startsWith('.claude.backup.'))
+        .map(f => f.replace('.claude.backup.', ''))
+        .sort()
+        .reverse();
+    } catch {
+      return [];
+    }
+  };
+
+  if (flags.list) {
+    const backups = listBackups();
+    console.log('Available backups:');
+    if (backups.length === 0) {
+      console.log('  (none)');
+    } else {
+      backups.forEach(b => console.log(`  ${b}`));
     }
     return;
   }
@@ -752,8 +760,7 @@ function runRestore(flags, config) {
     try {
       const entries = fs.readdirSync(home).filter(f => f.startsWith('.claude.backup.'));
       entries.forEach(e => {
-        const fullPath = path.join(home, e);
-        fs.rmSync(fullPath, { recursive: true, force: true });
+        fs.rmSync(path.join(home, e), { recursive: true, force: true });
         console.log(`  Removed: ${e}`);
       });
       console.log(`  ${entries.length} backup(s) removed.`);
@@ -764,44 +771,56 @@ function runRestore(flags, config) {
   }
 
   if (flags.cleanup) {
-    const backupPath = path.join(home, `.claude.backup.${flags.cleanup}`);
-    if (fs.existsSync(backupPath)) {
-      fs.rmSync(backupPath, { recursive: true, force: true });
-      console.log(`Removed backup: .claude.backup.${flags.cleanup}`);
-    } else {
-      console.log(`Backup not found: .claude.backup.${flags.cleanup}`);
-    }
-    return;
-  }
-
-  if (flags.backup) {
-    const backupPath = path.join(home, `.claude.backup.${flags.backup}`);
-    if (!fs.existsSync(backupPath)) {
-      console.log(`Backup not found: .claude.backup.${flags.backup}`);
+    const backups = listBackups();
+    if (backups.length === 0) {
+      console.log('No backups to clean up.');
       return;
     }
-
-    const claudeDir = path.join(home, '.claude');
-    console.log(`Restoring from backup: .claude.backup.${flags.backup}`);
-
-    // Copy backup back to .claude
-    if (fs.existsSync(claudeDir)) {
-      const safetyBackup = path.join(home, `.claude.before-restore.${Date.now()}`);
-      fs.cpSync(claudeDir, safetyBackup, { recursive: true });
-      console.log(`  Safety backup saved to: ${path.basename(safetyBackup)}`);
-      fs.rmSync(claudeDir, { recursive: true, force: true });
+    const target = await pickFromList('Pick a backup to remove:', backups, backups[0]);
+    const backupPath = path.join(home, `.claude.backup.${target}`);
+    if (fs.existsSync(backupPath)) {
+      fs.rmSync(backupPath, { recursive: true, force: true });
+      console.log(`Removed backup: .claude.backup.${target}`);
     }
-
-    fs.cpSync(backupPath, claudeDir, { recursive: true });
-    console.log('✓ Restore complete!');
     return;
   }
 
-  console.log('Usage:');
-  console.log('  claude-sync restore --list                  List all backups');
-  console.log('  claude-sync restore --backup <timestamp>    Restore a backup');
-  console.log('  claude-sync restore --cleanup <timestamp>   Remove a backup');
-  console.log('  claude-sync restore --cleanup-all           Remove all backups');
+  // Resolve backup timestamp: from flag, or interactive pick
+  let timestamp = flags.backup;
+
+  if (!timestamp) {
+    const backups = listBackups();
+    if (backups.length === 0) {
+      console.log('No backups found.');
+      return;
+    }
+    // Interactive: pick a backup to restore
+    timestamp = await pickFromList(
+      `Found ${backups.length} backup(s). Pick one to restore:`,
+      backups,
+      backups[0]
+    );
+  }
+
+  // Perform restore
+  const backupPath = path.join(home, `.claude.backup.${timestamp}`);
+  if (!fs.existsSync(backupPath)) {
+    console.log(`Backup not found: .claude.backup.${timestamp}`);
+    return;
+  }
+
+  const claudeDir = path.join(home, '.claude');
+  console.log(`Restoring from backup: .claude.backup.${timestamp}`);
+
+  if (fs.existsSync(claudeDir)) {
+    const safetyBackup = path.join(home, `.claude.before-restore.${Date.now()}`);
+    fs.cpSync(claudeDir, safetyBackup, { recursive: true });
+    console.log(`  Safety backup saved to: ${path.basename(safetyBackup)}`);
+    fs.rmSync(claudeDir, { recursive: true, force: true });
+  }
+
+  fs.cpSync(backupPath, claudeDir, { recursive: true });
+  console.log('✓ Restore complete!');
 }
 
 /**
@@ -848,7 +867,7 @@ export async function main(argv) {
       await runDiff(config, backend);
       break;
     case 'restore':
-      runRestore(flags, config);
+      await runRestore(flags, config);
       break;
   }
 }

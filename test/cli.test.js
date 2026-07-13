@@ -3,6 +3,24 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { parseArgs, isMainCheck } from '../claude-sync.js';
+import { pickFromList } from '../lib/prompt.js';
+
+describe('pickFromList (non-interactive)', () => {
+  it('returns default item in non-TTY mode', async () => {
+    const result = await pickFromList('Choose:', ['a', 'b', 'c'], 'b');
+    expect(result).toBe('b');
+  });
+
+  it('returns first item when no default and non-TTY', async () => {
+    const result = await pickFromList('Choose:', ['x', 'y', 'z']);
+    expect(result).toBe('x');
+  });
+
+  it('returns empty string for empty list', async () => {
+    const result = await pickFromList('Choose:', [], 'fallback');
+    expect(result).toBe('fallback');
+  });
+});
 
 describe('parseArgs', () => {
   it('parses push command', () => {
