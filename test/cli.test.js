@@ -71,6 +71,26 @@ describe('parseArgs', () => {
     const result = parseArgs(['node', 'claude-sync.js', 'unknown-cmd']);
     expect(result.command).toBe('unknown-cmd');
   });
+
+  it('parses -v as version flag', () => {
+    const result = parseArgs(['node', 'claude-sync.js', '-v']);
+    expect(result.flags.version).toBe(true);
+  });
+
+  it('parses --version as version flag', () => {
+    const result = parseArgs(['node', 'claude-sync.js', '--version']);
+    expect(result.flags.version).toBe(true);
+  });
+
+  it('parses -h as help flag', () => {
+    const result = parseArgs(['node', 'claude-sync.js', '-h']);
+    expect(result.flags.help).toBe(true);
+  });
+
+  it('parses --help as help flag', () => {
+    const result = parseArgs(['node', 'claude-sync.js', '--help']);
+    expect(result.flags.help).toBe(true);
+  });
 });
 
 describe('isMainCheck', () => {

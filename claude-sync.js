@@ -37,6 +37,18 @@ export function parseArgs(argv) {
   const command = args[0] || 'help';
   const flags = {};
 
+  // Handle top-level -v / --version before any command
+  for (const arg of args) {
+    if (arg === '-v' || arg === '--version') {
+      flags.version = true;
+      return { command, flags };
+    }
+    if (arg === '-h' || arg === '--help') {
+      flags.help = true;
+      return { command, flags };
+    }
+  }
+
   for (let i = 1; i < args.length; i++) {
     const arg = args[i];
     if (arg.startsWith('--')) {
@@ -52,6 +64,16 @@ export function parseArgs(argv) {
   }
 
   return { command, flags };
+}
+
+function getVersion() {
+  try {
+    const pkgPath = fileURLToPath(new URL('./package.json', import.meta.url));
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+    return pkg.version || 'unknown';
+  } catch {
+    return 'unknown';
+  }
 }
 
 function printHelp() {
@@ -71,6 +93,10 @@ Usage:
                                   Remove a specific backup
   claude-sync restore --cleanup-all
                                   Remove all backups
+
+Flags:
+  -v, --version                   Print version
+  -h, --help                      Print this help
 
 Backends: rclone (default), baidupcs, manual, custom
 Config:   ~/.claude-sync.conf (JSON) or ~/.claude-sync.json
@@ -770,7 +796,12 @@ function runRestore(flags, config) {
 export async function main(argv) {
   const { command, flags } = parseArgs(argv);
 
-  if (command === 'help' || !KNOWN_COMMANDS.includes(command)) {
+  if (flags.version) {
+    console.log(getVersion());
+    return;
+  }
+
+  if (command === 'help' || flags.help || !KNOWN_COMMANDS.includes(command)) {
     printHelp();
     return;
   }
