@@ -20,6 +20,16 @@ describe('pickFromList (non-interactive)', () => {
     const result = await pickFromList('Choose:', [], 'fallback');
     expect(result).toBe('fallback');
   });
+
+  it('works with header parameter (non-TTY)', async () => {
+    const result = await pickFromList('Pick:', ['a', 'b'], 'a', ['Header line 1', 'Header line 2']);
+    expect(result).toBe('a');
+  });
+
+  it('uses item matching for default selection', async () => {
+    const result = await pickFromList('Pick:', ['apple', 'banana', 'cherry'], 'cherry');
+    expect(result).toBe('cherry');
+  });
 });
 
 describe('parseArgs', () => {
