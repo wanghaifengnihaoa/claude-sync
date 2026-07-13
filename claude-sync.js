@@ -144,14 +144,15 @@ async function runInit(config) {
   console.log('╚══════════════════════════════════╝');
   console.log();
 
-  // 1. Choose backend
+  // 1. Choose backend (with descriptions in prompt, names only in list for clean picking)
+  const BACKEND_OPTIONS = ['rclone', 'baidupcs', 'manual', 'custom'];
   console.log('Available backends:');
-  console.log('  1. rclone    — 40+ cloud drives (Dropbox/GDrive/OneDrive/S3/WebDAV...)');
-  console.log('  2. baidupcs  — Baidu Netdisk (China users)');
-  console.log('  3. manual    — No CLI needed, handle files yourself (iCloud)');
-  console.log('  4. custom    — Your own upload/download commands');
-  const backendChoice = await prompt(`Backend [${config.BACKEND}]: `);
-  const backend = backendChoice.trim() || config.BACKEND;
+  console.log('  rclone    — 40+ cloud drives (Dropbox/GDrive/OneDrive/S3/WebDAV...)');
+  console.log('  baidupcs  — Baidu Netdisk (China users)');
+  console.log('  manual    — No CLI needed, handle files yourself (iCloud)');
+  console.log('  custom    — Your own upload/download commands');
+  console.log();
+  const backend = await pickFromList('Pick a backend (number or name):', BACKEND_OPTIONS, config.BACKEND || 'rclone');
   const finalConfig = { ...config, BACKEND: backend };
 
   // 2. Configure REMOTE per backend
