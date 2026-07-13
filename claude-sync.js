@@ -193,9 +193,18 @@ async function runInit(config) {
     const path = await prompt('Remote folder path [/claude-sync]: ');
     finalConfig.REMOTE = path.trim() || '/claude-sync';
   } else if (backend === 'custom') {
-    const upCmd = await prompt('Upload command ({file}=local, {remote}=dest): ');
+    console.log();
+    console.log('Custom backend — define your own upload/download shell commands.');
+    console.log('Use {file} for the local file path and {remote} for the remote path.');
+    console.log();
+    console.log('Examples:');
+    console.log('  rsync {file} user@nas:/backup/{remote}');
+    console.log('  aws s3 cp {file} s3://my-bucket/claude-sync/{remote}');
+    console.log('  scp {file} my-server:/data/claude-sync/bundle.tar.gz');
+    console.log();
+    const upCmd = await prompt('Upload command: ');
     if (upCmd.trim()) finalConfig.UPLOAD_CMD = upCmd.trim();
-    const downCmd = await prompt('Download command ({remote}=source, {file}=local): ');
+    const downCmd = await prompt('Download command: ');
     if (downCmd.trim()) finalConfig.DOWNLOAD_CMD = downCmd.trim();
   }
 
@@ -209,10 +218,12 @@ async function runInit(config) {
   }
 
   // 4. Secrets mode
-  const secChoice = await prompt(`Secrets mode: keep (transmit as-is) or strip (replace with ***)? [${config.SECRETS}]: `);
-  if (secChoice.trim() === 'strip' || secChoice.trim() === 'keep') {
-    finalConfig.SECRETS = secChoice.trim();
-  }
+  console.log();
+  console.log('Secrets mode — how to handle API keys & tokens:');
+  console.log('  keep   — transmit as-is (safe for private cloud storage)');
+  console.log('  strip  — replace values with *** (paranoid / untrusted storage)');
+  console.log();
+  finalConfig.SECRETS = await pickFromList('Choose:', ['keep', 'strip'], config.SECRETS || 'keep');
 
   // 5. Detect CLAUDE.md location
   const homeClaudeMd = path.join(path.dirname(finalConfig.CLAUDE_DIR), 'CLAUDE.md');
