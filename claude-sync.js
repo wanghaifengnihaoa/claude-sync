@@ -144,15 +144,20 @@ async function runInit(config) {
   console.log('╚══════════════════════════════════╝');
   console.log();
 
-  // 1. Choose backend (with descriptions in prompt, names only in list for clean picking)
+  // 1. Choose backend
   const BACKEND_OPTIONS = ['rclone', 'baidupcs', 'manual', 'custom'];
-  console.log('Available backends:');
-  console.log('  rclone    — 40+ cloud drives (Dropbox/GDrive/OneDrive/S3/WebDAV...)');
-  console.log('  baidupcs  — Baidu Netdisk (China users)');
-  console.log('  manual    — No CLI needed, handle files yourself (iCloud)');
-  console.log('  custom    — Your own upload/download commands');
-  console.log();
-  const backend = await pickFromList('Pick a backend (number or name):', BACKEND_OPTIONS, config.BACKEND || 'rclone');
+  const backend = await pickFromList(
+    'Pick a backend:',
+    BACKEND_OPTIONS,
+    config.BACKEND || 'rclone',
+    [
+      'Available backends:',
+      '  rclone    — 40+ cloud drives (Dropbox/GDrive/OneDrive/S3/WebDAV...)',
+      '  baidupcs  — Baidu Netdisk (China users)',
+      '  manual    — No CLI needed, handle files yourself (iCloud)',
+      '  custom    — Your own upload/download commands'
+    ]
+  );
   const finalConfig = { ...config, BACKEND: backend };
 
   // 2. Configure REMOTE per backend
@@ -219,11 +224,16 @@ async function runInit(config) {
 
   // 4. Secrets mode
   console.log();
-  console.log('Secrets mode — how to handle API keys & tokens:');
-  console.log('  keep   — transmit as-is (safe for private cloud storage)');
-  console.log('  strip  — replace values with *** (paranoid / untrusted storage)');
-  console.log();
-  finalConfig.SECRETS = await pickFromList('Choose:', ['keep', 'strip'], config.SECRETS || 'keep');
+  finalConfig.SECRETS = await pickFromList(
+    'Secrets mode:',
+    ['keep', 'strip'],
+    config.SECRETS || 'keep',
+    [
+      'How to handle API keys & tokens:',
+      '  keep   — transmit as-is (safe for private cloud storage)',
+      '  strip  — replace values with *** (untrusted storage)'
+    ]
+  );
 
   // 5. Detect CLAUDE.md location
   const homeClaudeMd = path.join(path.dirname(finalConfig.CLAUDE_DIR), 'CLAUDE.md');
