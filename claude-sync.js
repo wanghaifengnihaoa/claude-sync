@@ -17,7 +17,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { readConfig } from './lib/config.js';
+import { readConfig, remotePath } from './lib/config.js';
 import { spawnSync } from 'node:child_process';
 import { prompt, promptYesNo, pickFromList } from './lib/prompt.js';
 import { pushWorkflow, pullWorkflow, readSettings, extractMcpServers, countMemoryTopics } from './lib/workflow.js';
@@ -139,73 +139,143 @@ function createBackend(config) {
   }
 }
 
+/**
+ * Initialize the rclone backend REMOTE configuration.
+ *
+ * Extracted as a testable unit — all side effects (spawn, prompts) are
+ * injected so tests can mock them.
+ *
+ * @param {object} config - the accumulating finalConfig object (mutated in place)
+ * @param {object} deps - injectable dependencies
+ * @param {object} deps.backend - rclone backend instance (must have listRemotes)
+ * @param {function} deps.spawnFn - function like child_process.spawnSync
+ * @param {function} deps.askYesNo - promptYesNo equivalent
+ * @param {function} deps.askText - text prompt equivalent
+ * @param {function} deps.askPick - list picker equivalent
+ * @returns {Promise<{success: boolean, remote?: string, reason?: string}>}
+ */
+export async function initRcloneRemote(config, {
+  spawnFn = spawnSync,
+  listRemotesFn,
+  askText = prompt,
+  askPick = pickFromList
+} = {}) {
+  // ── Phase 1: Check rclone CLI is installed ──
+  const check = spawnFn('rclone', ['version'], { stdio: 'pipe' });
+  if (check.error) {
+    return {
+      success: false,
+      reason: 'user_back',
+      message: [
+        '✗ rclone not found. Install it first, or pick another backend:',
+        '  macOS:  brew install rclone',
+        '  Linux:  curl https://rclone.org/install.sh | sudo bash',
+        '  Windows: scoop install rclone',
+        '  Docs: https://rclone.org/install/'
+      ]
+    };
+  }
+
+  // ── Phase 2: Wait for user to configure remotes ──
+  while (true) {
+    let remotes;
+    let errorMsg = null;
+    try {
+      remotes = await listRemotesFn();
+    } catch {
+      errorMsg = '⚠ rclone error while listing remotes. Is rclone installed correctly?';
+    }
+
+    if (errorMsg) {
+      const choice = await askPick(
+        `Checking rclone remotes...\n${errorMsg}`,
+        ['Retry', 'Back'],
+        'Retry',
+        ['✓ rclone found']
+      );
+      if (choice === 'Back') return { success: false, reason: 'user_back' };
+      continue;
+    }
+
+    if (remotes.length > 0) {
+      const remoteName = await askPick(
+        `Found ${remotes.length} remote(s):`,
+        remotes,
+        remotes[0],
+        ['✓ rclone found']
+      );
+      // REMOTE is just the rclone remote name — folder path is set at push time
+      config.REMOTE = `${remoteName}:`;
+      return { success: true, remote: config.REMOTE };
+    }
+
+    // No remotes — user must configure rclone themselves
+    const choice = await askPick(
+      'No remotes configured.',
+      ['Retry', 'Back'],
+      'Retry',
+      [
+        '✓ rclone found',
+        'Please run "rclone config" to set up a cloud drive,',
+        'then come back here to continue.'
+      ]
+    );
+    if (choice === 'Back') return { success: false, reason: 'user_back' };
+    // Retry — loop back and re-check
+  }
+}
+
 async function runInit(config) {
   console.log('╔══════════════════════════════════╗');
   console.log('║   claude-sync — interactive init ║');
   console.log('╚══════════════════════════════════╝');
   console.log();
 
-  // 1. Choose backend
+  // 1. Choose backend (loops back on 'user_back' from rclone init)
   const BACKEND_OPTIONS = ['rclone', 'baidupcs', 'manual', 'custom'];
-  const backend = await pickFromList(
-    'Pick a backend:',
-    BACKEND_OPTIONS,
-    config.BACKEND || 'rclone',
-    [
-      'Available backends:',
-      '  rclone    — 40+ cloud drives (Dropbox/GDrive/OneDrive/S3/WebDAV...)',
-      '  baidupcs  — Baidu Netdisk (China users)',
-      '  manual    — No CLI needed, handle files yourself (iCloud)',
-      '  custom    — Your own upload/download commands'
-    ]
-  );
-  const finalConfig = { ...config, BACKEND: backend };
+  let backend;
+  let statusMsg = null;
+  const finalConfig = { ...config };
 
-  // 2. Configure REMOTE per backend
-  if (backend === 'rclone') {
-    console.log();
-    console.log('Checking rclone...');
-    try {
+  // DEC save/restore cursor (ESC 7 / ESC 8) — independent of ANSI ESC[s used by pickFromList
+  process.stdout.write('\x1b7');
+
+  while (true) {
+    // Return to saved position and clear below, so each iteration overwrites previous render
+    process.stdout.write('\x1b8\x1b[J');
+    backend = await pickFromList(
+      'Pick a backend:',
+      BACKEND_OPTIONS,
+      config.BACKEND || 'rclone',
+      [
+        'Available backends:',
+        '  rclone    — 40+ cloud drives (Dropbox/GDrive/OneDrive/S3/WebDAV...)',
+        '  baidupcs  — Baidu Netdisk (China users)',
+        '  manual    — No CLI needed, handle files yourself (iCloud)',
+        '  custom    — Your own upload/download commands'
+      ],
+      statusMsg  // footer — error messages shown at the bottom
+    );
+    statusMsg = null; // clear after display
+    finalConfig.BACKEND = backend;
+
+    // 2. Configure REMOTE per backend
+    if (backend === 'rclone') {
       const rcloneBackend = createRcloneBackend();
-      let remotes = await rcloneBackend.listRemotes();
-
-      // No remotes? Offer to run rclone config right here
-      while (remotes.length === 0) {
-        console.log('  No remotes configured yet.');
-        const doConfig = await promptYesNo('Run rclone config to set up a cloud drive now?', true);
-        if (doConfig) {
-          spawnSync('rclone', ['config'], { stdio: 'inherit' });
-          // Refresh the remote list
-          try {
-            remotes = await rcloneBackend.listRemotes();
-          } catch {
-            console.log('  rclone error. Install: https://rclone.org/install/');
-            break;
-          }
-        } else {
-          console.log('  Skipping. You can run "rclone config" later and re-run init.');
-          break;
-        }
+      const rcloneResult = await initRcloneRemote(finalConfig, {
+        spawnFn: spawnSync,
+        listRemotesFn: () => rcloneBackend.listRemotes(),
+        askText: prompt,
+        askPick: pickFromList
+      });
+      if (rcloneResult.message) {
+        statusMsg = rcloneResult.message;
       }
-
-      if (remotes.length > 0) {
-        const remoteName = await pickFromList(
-          `Found ${remotes.length} remote(s):`,
-          remotes,
-          remotes[0]
-        );
-        const folder = await prompt('Folder path on remote [claude-sync/]: ');
-        finalConfig.REMOTE = `${remoteName}:${folder.trim() || 'claude-sync/'}`;
-      } else {
-        const manualRemote = await prompt('Enter REMOTE manually (e.g. gdrive:claude-sync/): ');
-        if (manualRemote.trim()) finalConfig.REMOTE = manualRemote.trim();
+      if (rcloneResult.reason === 'user_back') {
+        continue;
       }
-    } catch {
-      console.log('  rclone not found. Install: https://rclone.org/install/');
-      const manualRemote = await prompt('Enter REMOTE manually: ');
-      if (manualRemote.trim()) finalConfig.REMOTE = manualRemote.trim();
-    }
-  } else if (backend === 'baidupcs') {
+      break;
+    } else if (backend === 'baidupcs') {
     console.log();
     console.log('Checking BaiduPCS-Go...');
     try {
@@ -223,8 +293,7 @@ async function runInit(config) {
     } catch {
       console.log('  BaiduPCS-Go not found. Install: https://github.com/qjfoidnh/BaiduPCS-Go');
     }
-    const path = await prompt('Remote folder path [/claude-sync]: ');
-    finalConfig.REMOTE = path.trim() || '/claude-sync';
+    finalConfig.REMOTE = '/';
   } else if (backend === 'custom') {
     console.log();
     console.log('Custom backend — define your own upload/download shell commands.');
@@ -240,6 +309,9 @@ async function runInit(config) {
     const downCmd = await prompt('Download command: ');
     if (downCmd.trim()) finalConfig.DOWNLOAD_CMD = downCmd.trim();
   }
+  // Non-rclone backends: configured, exit the selection loop
+  break;
+  }
 
   // 3. Machine ID
   console.log();
@@ -250,29 +322,16 @@ async function runInit(config) {
     if (customName.trim()) finalConfig.MACHINE_ID = customName.trim();
   }
 
-  // 4. Secrets mode
-  console.log();
-  finalConfig.SECRETS = await pickFromList(
-    'Secrets mode:',
-    ['keep', 'strip'],
-    config.SECRETS || 'keep',
-    [
-      'How to handle API keys & tokens:',
-      '  keep   — transmit as-is (safe for private cloud storage)',
-      '  strip  — replace values with *** (untrusted storage)'
-    ]
-  );
-
-  // 5. Detect CLAUDE.md location
+  // 4. Detect CLAUDE.md location
   const homeClaudeMd = path.join(path.dirname(finalConfig.CLAUDE_DIR), 'CLAUDE.md');
   const claudeDirMd = path.join(finalConfig.CLAUDE_DIR, 'CLAUDE.md');
   console.log();
   if (fs.existsSync(homeClaudeMd)) console.log(`  Found: ~/CLAUDE.md`);
   if (fs.existsSync(claudeDirMd)) console.log(`  Found: ~/.claude/CLAUDE.md`);
 
-  // 6. Save config
+  // 5. Save config
   const configPath = path.join((config.HOME || os.homedir()), '.claude-sync.json');
-  const toSave = { REMOTE: finalConfig.REMOTE, BACKEND: finalConfig.BACKEND, SECRETS: finalConfig.SECRETS, MACHINE_ID: finalConfig.MACHINE_ID };
+  const toSave = { REMOTE: finalConfig.REMOTE, BACKEND: finalConfig.BACKEND, MACHINE_ID: finalConfig.MACHINE_ID };
   if (finalConfig.UPLOAD_CMD) toSave.UPLOAD_CMD = finalConfig.UPLOAD_CMD;
   if (finalConfig.DOWNLOAD_CMD) toSave.DOWNLOAD_CMD = finalConfig.DOWNLOAD_CMD;
   fs.writeFileSync(configPath, JSON.stringify(toSave, null, 2));
@@ -285,6 +344,37 @@ async function runInit(config) {
 }
 
 async function runPush(config, backend, flags) {
+  // Ask folder path and secrets mode every push
+  const configPath = path.join((config.HOME || os.homedir()), '.claude-sync.json');
+
+  const folder = await pickFromList(
+    'Folder path on remote:',
+    ['claude-sync/', 'Custom...'],
+    config.REMOTE_FOLDER || 'claude-sync/'
+  );
+  config.REMOTE_FOLDER = (folder === 'Custom...')
+    ? ((await prompt('Enter folder path: ')).trim() || 'claude-sync/')
+    : folder;
+
+  config.SECRETS = await pickFromList(
+    'Secrets mode:',
+    ['keep', 'strip'],
+    config.SECRETS || 'keep',
+    [
+      'How to handle API keys & tokens:',
+      '  keep   — transmit as-is (safe for private cloud storage)',
+      '  strip  — replace values with *** (untrusted storage)'
+    ]
+  );
+
+  // Persist choices
+  try {
+    const existing = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    existing.REMOTE_FOLDER = config.REMOTE_FOLDER;
+    existing.SECRETS = config.SECRETS;
+    fs.writeFileSync(configPath, JSON.stringify(existing, null, 2));
+  } catch { /* config file not found, skip save */ }
+
   console.log('Pushing configuration to remote...');
   const result = await pushWorkflow(config, backend, { force: flags.force });
 
@@ -306,6 +396,44 @@ async function runPull(config, backend, flags) {
   if (flags.keep) strategy = 'keep';
   if (flags.interactive) strategy = 'interactive';
   if (flags['dry-run']) strategy = 'dry-run';
+
+  // Ask which folder to pull from (avoid pulling from wrong one when multiple exist)
+  const configPath = path.join((config.HOME || os.homedir()), '.claude-sync.json');
+
+  let folderOptions = ['claude-sync/', 'Custom...'];
+  let defaultFolder = config.REMOTE_FOLDER || 'claude-sync/';
+
+  // Try to list folders from the remote
+  if (config.BACKEND === 'rclone' && config.REMOTE) {
+    try {
+      const remoteName = config.REMOTE.replace(/:$/, '');
+      const remoteFolders = await backend.listFolders(remoteName);
+      if (remoteFolders.length > 0) {
+        folderOptions = [...remoteFolders, 'Custom...'];
+        if (remoteFolders.includes(defaultFolder)) {
+          // Keep defaultFolder as-is (it exists on remote)
+        } else if (remoteFolders.length > 0) {
+          defaultFolder = remoteFolders[0];
+        }
+      }
+    } catch { /* backend doesn't support listFolders, use defaults */ }
+  }
+
+  const folder = await pickFromList(
+    'Pull from folder:',
+    folderOptions,
+    defaultFolder
+  );
+  config.REMOTE_FOLDER = (folder === 'Custom...')
+    ? ((await prompt('Enter folder path: ')).trim() || 'claude-sync/')
+    : folder;
+
+  // Persist choice
+  try {
+    const existing = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    existing.REMOTE_FOLDER = config.REMOTE_FOLDER;
+    fs.writeFileSync(configPath, JSON.stringify(existing, null, 2));
+  } catch { /* skip */ }
 
   console.log('Pulling configuration from remote...');
   const result = await pullWorkflow(config, backend, { strategy });
@@ -332,7 +460,7 @@ async function runStatus(config, backend) {
     }
 
     const tmpManifest = path.join(config.BUNDLE_DIR, 'status-manifest.json');
-    await backend.download(`${config.REMOTE}/manifest.json`, tmpManifest);
+    await backend.download(remotePath(config, 'manifest.json'), tmpManifest);
     const manifest = readManifest(tmpManifest);
 
     if (!manifest) {
@@ -535,7 +663,7 @@ async function runDiff(config, backend) {
     } else {
       // Download manifest from remote
       const tmpManifest = path.join(bundleDir, 'diff-manifest.json');
-      await backend.download(`${config.REMOTE}/manifest.json`, tmpManifest);
+      await backend.download(remotePath(config, 'manifest.json'), tmpManifest);
       manifest = readManifest(tmpManifest);
       try { fs.unlinkSync(tmpManifest); } catch {}
     }
@@ -560,7 +688,7 @@ async function runDiff(config, backend) {
       tmpExtract = path.join(bundleDir, 'diff-extract');
       try {
         if (config.BACKEND !== 'manual') {
-          await backend.download(`${config.REMOTE}/bundle.tar.gz`, tmpBundle);
+          await backend.download(remotePath(config, 'bundle.tar.gz'), tmpBundle);
         }
         const { extractBundle } = await import('./lib/sync.js');
         if (fs.existsSync(tmpExtract)) fs.rmSync(tmpExtract, { recursive: true, force: true });
@@ -854,7 +982,21 @@ async function runRestore(flags, config) {
     const safetyBackup = path.join(home, `.claude.before-restore.${Date.now()}`);
     fs.cpSync(claudeDir, safetyBackup, { recursive: true });
     console.log(`  Safety backup saved to: ${path.basename(safetyBackup)}`);
-    fs.rmSync(claudeDir, { recursive: true, force: true });
+
+    // Delete current .claude — use atomic rename trick to avoid ENOTEMPTY issues
+    // that can happen with deeply nested dirs (e.g. git repos with many objects).
+    const oldDir = path.join(home, `.claude.old.${Date.now()}`);
+    try {
+      fs.renameSync(claudeDir, oldDir);
+    } catch {
+      // rename failed, try direct removal
+      try { fs.rmSync(claudeDir, { recursive: true, force: true }); } catch {
+        // last resort: shell fallback for stubborn files
+        spawnSync('rm', ['-rf', claudeDir]);
+      }
+    }
+    // Clean up the renamed old dir in background
+    try { fs.rmSync(oldDir, { recursive: true, force: true }); } catch { /* ok, will be cleaned up later */ }
   }
 
   fs.cpSync(backupPath, claudeDir, { recursive: true });

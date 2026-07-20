@@ -43,6 +43,22 @@ describe('createManifest', () => {
     const manifest = createManifest({ files: {}, plugins: {}, skills: {}, mcp_servers: [], memory: null }, { sourceUser: 'bob' });
     expect(manifest.pushed_by).toBe(os.hostname());
   });
+
+  it('stores claude_version when provided', () => {
+    const manifest = createManifest(
+      { files: {}, plugins: {}, skills: {}, mcp_servers: [], memory: null, claude_version: '1.2.3' },
+      { sourceUser: 'alice' }
+    );
+    expect(manifest.claude_version).toBe('1.2.3');
+  });
+
+  it('claude_version is null when not provided', () => {
+    const manifest = createManifest(
+      { files: {}, plugins: {}, skills: {}, mcp_servers: [], memory: null },
+      { sourceUser: 'bob' }
+    );
+    expect(manifest.claude_version).toBeNull();
+  });
 });
 
 describe('buildBundle', () => {

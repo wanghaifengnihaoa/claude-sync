@@ -12,8 +12,10 @@ import {
   resolveSymlinksInDir,
   checkStatusLinePaths,
   copyDirContents,
-  handlePlugins
+  handlePlugins,
+  getClaudeVersion
 } from '../lib/workflow.js';
+import { detectSkills, classifySkill } from '../lib/detect.js';
 
 // ==============================
 // extractMcpServers
@@ -405,5 +407,301 @@ describe('handlePlugins', () => {
     await expect(
       handlePlugins(manifestPlugins, claudeDir, 'keep')
     ).resolves.toBeUndefined();
+  });
+});
+
+// ==============================
+// getClaudeVersion
+// ==============================
+describe('getClaudeVersion', () => {
+  it('returns semver or null without throwing', () => {
+    const v = getClaudeVersion();
+    // Either null (not installed) or a valid semver
+    if (v !== null) {
+      expect(v).toMatch(/^\d+\.\d+\.\d+/);
+    }
+  });
+});
+
+// ============================================================================
+// INTEGRATION: resolveSymlinksInDir cross-directory symlink (child_symlink pattern)
+//
+// Reproduces the real-world scenario:
+//   skills/
+//     repo-skill/           ← git repo (has .git)
+//       SKILL.md
+//     wrapper-skill/  ← child_symlink skill
+//       SKILL.md  →  ../repo-skill/SKILL.md   (cross-directory symlink)
+//
+// The symlink must be dereferenced so the tar bundle is self-contained,
+// even when resolveSymlinksInDir recurses into subdirectories and the
+// ALLOWED_ROOTS would normally narrow to just the child directory.
+// ============================================================================
+describe('resolveSymlinksInDir — child_symlink integration', () => {
+  let stagingDir;
+
+  beforeEach(() => {
+    stagingDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cs-sym-integration-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(stagingDir, { recursive: true, force: true });
+  });
+
+  it('dereferences child_symlink SKILL.md pointing to sibling git-repo skill', () => {
+    const skillsDir = path.join(stagingDir, 'skills');
+
+    // git repo skill: repo-skill/
+    const gitSkillDir = path.join(skillsDir, 'repo-skill');
+    fs.mkdirSync(gitSkillDir, { recursive: true });
+    fs.mkdirSync(path.join(gitSkillDir, '.git'));
+    fs.writeFileSync(path.join(gitSkillDir, 'SKILL.md'),
+      '---\nname: repo-skill\n---\n\n# Shared skill content\n');
+
+    // child_symlink skill: wrapper-skill/
+    const childSkillDir = path.join(skillsDir, 'wrapper-skill');
+    fs.mkdirSync(childSkillDir, { recursive: true });
+    fs.symlinkSync(
+      path.join(gitSkillDir, 'SKILL.md'),
+      path.join(childSkillDir, 'SKILL.md')
+    );
+
+    // Verify setup: SKILL.md is a symlink
+    expect(fs.lstatSync(path.join(childSkillDir, 'SKILL.md')).isSymbolicLink()).toBe(true);
+
+    // Act
+    resolveSymlinksInDir(skillsDir);
+
+    // Assert: symlink is dereferenced to a real file
+    const childMd = path.join(childSkillDir, 'SKILL.md');
+    expect(fs.existsSync(childMd)).toBe(true);
+    expect(fs.lstatSync(childMd).isSymbolicLink()).toBe(false);
+    expect(fs.readFileSync(childMd, 'utf-8')).toContain('Shared skill content');
+
+    // Assert: git skill untouched
+    expect(fs.existsSync(path.join(gitSkillDir, 'SKILL.md'))).toBe(true);
+    expect(fs.existsSync(path.join(gitSkillDir, '.git'))).toBe(true);
+  });
+
+  it('dereferences multiple child_symlink skills pointing to the same git repo', () => {
+    const skillsDir = path.join(stagingDir, 'skills');
+
+    // git repo skill
+    const gitDir = path.join(skillsDir, 'repo-skill');
+    fs.mkdirSync(gitDir, { recursive: true });
+    fs.mkdirSync(path.join(gitDir, '.git'));
+    fs.writeFileSync(path.join(gitDir, 'SKILL.md'), '---\nname: repo-skill\n---\n');
+
+    // multiple child_symlink skills
+    const children = ['sub-skill-a', 'sub-skill-b', 'sub-skill-c', 'sub-skill-d'];
+    for (const name of children) {
+      // simulate: each child skill has its own sub-skill dir inside repo-skill
+      const subDir = path.join(gitDir, name);
+      fs.mkdirSync(subDir, { recursive: true });
+      fs.writeFileSync(path.join(subDir, 'SKILL.md'), `---\nname: ${name}\n---\n# ${name}\n`);
+
+      const childDir = path.join(skillsDir, name);
+      fs.mkdirSync(childDir, { recursive: true });
+      fs.symlinkSync(path.join(subDir, 'SKILL.md'), path.join(childDir, 'SKILL.md'));
+    }
+
+    // Verify all are symlinks
+    for (const name of children) {
+      expect(fs.lstatSync(path.join(skillsDir, name, 'SKILL.md')).isSymbolicLink()).toBe(true);
+    }
+
+    // Act
+    resolveSymlinksInDir(skillsDir);
+
+    // Assert: all dereferenced
+    for (const name of children) {
+      const md = path.join(skillsDir, name, 'SKILL.md');
+      expect(fs.lstatSync(md).isSymbolicLink()).toBe(false);
+      expect(fs.readFileSync(md, 'utf-8')).toContain(`name: ${name}`);
+    }
+  });
+
+  it('leaves plain (non-symlink) files untouched', () => {
+    const skillsDir = path.join(stagingDir, 'skills');
+    const plainDir = path.join(skillsDir, 'my-plain-skill');
+    fs.mkdirSync(plainDir, { recursive: true });
+    fs.writeFileSync(path.join(plainDir, 'SKILL.md'), '# plain');
+
+    resolveSymlinksInDir(skillsDir);
+
+    expect(fs.lstatSync(path.join(plainDir, 'SKILL.md')).isSymbolicLink()).toBe(false);
+    expect(fs.readFileSync(path.join(plainDir, 'SKILL.md'), 'utf-8')).toBe('# plain');
+  });
+
+  it('skips symlinks pointing outside staging dir + HOME', () => {
+    const skillsDir = path.join(stagingDir, 'skills');
+    const skillDir = path.join(skillsDir, 'evil-skill');
+    fs.mkdirSync(skillDir, { recursive: true });
+    // Symlink pointing to /etc/passwd — outside allowed roots
+    fs.symlinkSync('/etc/passwd', path.join(skillDir, 'SKILL.md'));
+
+    // Should not throw
+    resolveSymlinksInDir(skillsDir);
+
+    // Symlink should remain (not dereferenced, not removed — it's a security skip)
+    const md = path.join(skillDir, 'SKILL.md');
+    expect(fs.lstatSync(md).isSymbolicLink()).toBe(true);
+  });
+
+  it('removes broken symlinks (target does not exist)', () => {
+    const skillsDir = path.join(stagingDir, 'skills');
+    const skillDir = path.join(skillsDir, 'dead-skill');
+    fs.mkdirSync(skillDir, { recursive: true });
+    // Symlink pointing to non-existent target (within allowed root)
+    fs.symlinkSync(path.join(skillsDir, 'nonexistent', 'SKILL.md'), path.join(skillDir, 'SKILL.md'));
+
+    // Should not throw
+    resolveSymlinksInDir(skillsDir);
+
+    // Broken symlink should be removed
+    expect(fs.existsSync(path.join(skillDir, 'SKILL.md'))).toBe(false);
+  });
+});
+
+// ============================================================================
+// INTEGRATION: Push flow — detect → resolve symlinks → remove git skills
+//
+// Simulates the push pipeline: skill types are detected, symlinks dereferenced,
+// git/skills_sh skills removed from staging. Verifies child_symlink skills
+// remain with dereferenced content.
+// ============================================================================
+describe('Push pipeline — skills processing', () => {
+  let stagingDir, agentsDir;
+
+  beforeEach(() => {
+    stagingDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cs-push-pipeline-'));
+    agentsDir = path.join(stagingDir, '.agents');
+  });
+
+  afterEach(() => {
+    fs.rmSync(stagingDir, { recursive: true, force: true });
+  });
+
+  it('detectSkills classifies git, child_symlink, and plain correctly', () => {
+    const skillsDir = path.join(stagingDir, 'skills');
+
+    // git repo
+    const gitDir = path.join(skillsDir, 'repo-skill');
+    fs.mkdirSync(gitDir, { recursive: true });
+    fs.mkdirSync(path.join(gitDir, '.git'));
+    fs.writeFileSync(path.join(gitDir, 'SKILL.md'), '# repo-skill');
+
+    // child_symlink
+    const childDir = path.join(skillsDir, 'sub-skill-a');
+    fs.mkdirSync(childDir, { recursive: true });
+    fs.symlinkSync(path.join(gitDir, 'SKILL.md'), path.join(childDir, 'SKILL.md'));
+
+    // plain
+    const plainDir = path.join(skillsDir, 'my-custom-skill');
+    fs.mkdirSync(plainDir, { recursive: true });
+    fs.writeFileSync(path.join(plainDir, 'SKILL.md'), '# custom');
+
+    const results = detectSkills(skillsDir, agentsDir);
+
+    const git = results.find(s => s.name === 'repo-skill');
+    const child = results.find(s => s.name === 'sub-skill-a');
+    const plain = results.find(s => s.name === 'my-custom-skill');
+
+    expect(git.type).toBe('git');
+    expect(child.type).toBe('child_symlink');
+    expect(child.skillMdTarget).toBe(path.join(gitDir, 'SKILL.md'));
+    expect(plain.type).toBe('plain');
+  });
+
+  it('push flow: after resolve + remove git, child_symlink has real file in staging', () => {
+    const skillsDir = path.join(stagingDir, 'skills');
+
+    // git repo with multiple sub-skills
+    const gitDir = path.join(skillsDir, 'repo-skill');
+    fs.mkdirSync(gitDir, { recursive: true });
+    fs.mkdirSync(path.join(gitDir, '.git'));
+    fs.writeFileSync(path.join(gitDir, 'SKILL.md'), '---\nname: repo-skill\n---\n');
+
+    const subSkills = ['sub-skill-a', 'sub-skill-b', 'sub-skill-c'];
+    for (const name of subSkills) {
+      const subDir = path.join(gitDir, name);
+      fs.mkdirSync(subDir, { recursive: true });
+      fs.writeFileSync(path.join(subDir, 'SKILL.md'), `---\nname: ${name}\n---\n`);
+
+      const childDir = path.join(skillsDir, name);
+      fs.mkdirSync(childDir, { recursive: true });
+      fs.symlinkSync(path.join(subDir, 'SKILL.md'), path.join(childDir, 'SKILL.md'));
+    }
+
+    // plain skill
+    const plainDir = path.join(skillsDir, 'my-custom');
+    fs.mkdirSync(plainDir, { recursive: true });
+    fs.writeFileSync(path.join(plainDir, 'SKILL.md'), '# custom');
+
+    // Step 1: Detect
+    const detected = detectSkills(skillsDir, agentsDir);
+    const gitSkills = detected.filter(s => s.type === 'git');
+    const childSkills = detected.filter(s => s.type === 'child_symlink');
+    const plainSkills = detected.filter(s => s.type === 'plain');
+
+    expect(gitSkills).toHaveLength(1);
+    expect(childSkills).toHaveLength(3);
+    expect(plainSkills).toHaveLength(1);
+
+    // Step 2: Resolve symlinks
+    resolveSymlinksInDir(skillsDir);
+
+    // After resolve, child_symlink SKILL.md should be real files
+    for (const name of subSkills) {
+      const md = path.join(skillsDir, name, 'SKILL.md');
+      expect(fs.lstatSync(md).isSymbolicLink()).toBe(false);
+      expect(fs.readFileSync(md, 'utf-8')).toContain(`name: ${name}`);
+    }
+
+    // Step 3: Remove git skills from staging
+    for (const skill of detected) {
+      if (skill.type === 'git') {
+        fs.rmSync(path.join(skillsDir, skill.name), { recursive: true, force: true });
+      }
+    }
+
+    // After removal: git repo gone, child_symlink + plain remain with real files
+    expect(fs.existsSync(gitDir)).toBe(false);
+
+    for (const name of subSkills) {
+      expect(fs.existsSync(path.join(skillsDir, name))).toBe(true);
+      const md = path.join(skillsDir, name, 'SKILL.md');
+      expect(fs.lstatSync(md).isSymbolicLink()).toBe(false);
+    }
+
+    // Plain skill untouched
+    expect(fs.existsSync(path.join(plainDir, 'SKILL.md'))).toBe(true);
+  });
+
+  it('edge case: child_symlink pointing to git skill that has nested sub-skill directories', () => {
+    const skillsDir = path.join(stagingDir, 'skills');
+
+    // git repo with nested structure: repo-skill/sub-skill-d/SKILL.md
+    const gitDir = path.join(skillsDir, 'repo-skill');
+    fs.mkdirSync(gitDir, { recursive: true });
+    fs.mkdirSync(path.join(gitDir, '.git'));
+
+    const subDir = path.join(gitDir, 'sub-skill-d');
+    fs.mkdirSync(subDir, { recursive: true });
+    fs.writeFileSync(path.join(subDir, 'SKILL.md'), '---\nname: sub-skill-d\n---\n# Ship workflow\n');
+
+    // child_symlink: sub-skill-d/SKILL.md -> ../repo-skill/sub-skill-d/SKILL.md
+    const childDir = path.join(skillsDir, 'sub-skill-d');
+    fs.mkdirSync(childDir, { recursive: true });
+    // Using relative path to test resolution
+    fs.symlinkSync('../repo-skill/sub-skill-d/SKILL.md', path.join(childDir, 'SKILL.md'));
+
+    // Act
+    resolveSymlinksInDir(skillsDir);
+
+    // Assert: dereferenced even with relative paths through parent dirs
+    const md = path.join(childDir, 'SKILL.md');
+    expect(fs.lstatSync(md).isSymbolicLink()).toBe(false);
+    expect(fs.readFileSync(md, 'utf-8')).toBe('---\nname: sub-skill-d\n---\n# Ship workflow\n');
   });
 });

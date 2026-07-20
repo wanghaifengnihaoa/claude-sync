@@ -50,6 +50,23 @@ export function createRcloneBackend(execFn) {
       } catch {
         return [];
       }
+    },
+
+    async listFolders(remote) {
+      try {
+        const { stdout } = await run('rclone', ['lsd', `${remote}:`]);
+        return stdout
+          .trim()
+          .split('\n')
+          .filter(Boolean)
+          .map(line => {
+            // rclone lsd output: "        -1 2024-01-01 12:00:00        -1 dirname"
+            const parts = line.trim().split(/\s+/);
+            return parts[parts.length - 1] + '/';
+          });
+      } catch {
+        return [];
+      }
     }
   };
 }
