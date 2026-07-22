@@ -9,7 +9,7 @@ Secrets are transmitted as-is inside the tar.gz bundle.
 - **Push:** No modification. Secrets travel with the bundle.
 - **Pull:** Secrets land on target machine unchanged.
 
-**Use when:** Your cloud backend is private (your own rclone account, Baidu Netdisk private space). The bundle is encrypted in transit by your cloud provider.
+**Use when:** Your cloud backend is private (e.g. your own rclone account). The bundle is encrypted in transit by your cloud provider.
 
 ## `strip` mode
 

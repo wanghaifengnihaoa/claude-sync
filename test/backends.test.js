@@ -1,8 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { createRcloneBackend } from '../backends/rclone.js';
 import { createManualBackend } from '../backends/manual.js';
-import { createBaidupcsBackend } from '../backends/baidupcs.js';
-import { createCustomBackend, shellEscape } from '../backends/custom.js';
+import { createCustomBackend, shellEscape, runShell } from '../backends/custom.js';
 
 // Helper to create a backend with a fake exec for testing
 function fakeExec(responses) {
@@ -144,70 +143,6 @@ describe('manual backend', () => {
 });
 
 // ==============================
-// baidupcs backend
-// ==============================
-describe('baidupcs backend', () => {
-  it('upload calls BaiduPCS-Go upload with correct arguments', async () => {
-    const calls = [];
-    const exec = async (cmd, args) => {
-      calls.push({ cmd, args });
-      return { stdout: '', stderr: '' };
-    };
-
-    const backend = createBaidupcsBackend(exec);
-    await backend.upload('/tmp/bundle.tar.gz', '/claude-sync');
-
-    expect(calls).toHaveLength(1);
-    expect(calls[0].cmd).toBe('BaiduPCS-Go');
-    expect(calls[0].args).toContain('upload');
-    expect(calls[0].args).toContain('/tmp/bundle.tar.gz');
-    expect(calls[0].args).toContain('/claude-sync');
-  });
-
-  it('download calls BaiduPCS-Go download with correct arguments', async () => {
-    const calls = [];
-    const exec = async (cmd, args) => {
-      calls.push({ cmd, args });
-      return { stdout: '', stderr: '' };
-    };
-
-    const backend = createBaidupcsBackend(exec);
-    await backend.download('/claude-sync/bundle.tar.gz', '/tmp/bundle.tar.gz');
-
-    expect(calls).toHaveLength(1);
-    expect(calls[0].cmd).toBe('BaiduPCS-Go');
-    expect(calls[0].args).toContain('download');
-    expect(calls[0].args).toContain('/claude-sync/bundle.tar.gz');
-  });
-
-  it('checkLogin returns true when BaiduPCS-Go who succeeds', async () => {
-    const exec = async () => ({ stdout: 'Logged in', stderr: '' });
-    const backend = createBaidupcsBackend(exec);
-    const result = await backend.checkLogin();
-    expect(result).toBe(true);
-  });
-
-  it('checkLogin returns false when BaiduPCS-Go who fails', async () => {
-    const exec = async () => { throw new Error('not logged in'); };
-    const backend = createBaidupcsBackend(exec);
-    const result = await backend.checkLogin();
-    expect(result).toBe(false);
-  });
-
-  it('upload throws when BaiduPCS-Go fails', { timeout: 15000 }, async () => {
-    const exec = fakeExec({
-      'BaiduPCS-Go upload /tmp/bundle.tar.gz /claude-sync':
-        new Error('BaiduPCS-Go: not found')
-    });
-
-    const backend = createBaidupcsBackend(exec);
-    await expect(
-      backend.upload('/tmp/bundle.tar.gz', '/claude-sync')
-    ).rejects.toThrow('baidupcs upload failed');
-  });
-});
-
-// ==============================
 // custom backend
 // ==============================
 describe('custom backend', () => {
@@ -276,5 +211,42 @@ describe('custom backend', () => {
     const r3 = shellEscape("it's a test");
     expect(r3).toContain("\\'");
     expect(r3).toBe("'it'\\''s a test'");
+  });
+});
+
+// ==============================
+// runShell (cross-platform shell routing)
+// ==============================
+describe('runShell', () => {
+  it('Unix: passes the command straight to exec (no wrapper)', async () => {
+    let received = null;
+    const execAsync = async (cmd) => { received = cmd; return { stdout: '', stderr: '' }; };
+    await runShell('scp /tmp/a user@h:/b', { platform: 'darwin', execAsync });
+    expect(received).toBe('scp /tmp/a user@h:/b');
+  });
+
+  it('Windows: wraps the command in powershell -NoProfile -Command "..."', async () => {
+    let received = null;
+    const execAsync = async (cmd) => { received = cmd; return { stdout: '', stderr: '' }; };
+    await runShell('aws s3 cp \'/path with space/x\' s3://b/x', { platform: 'win32', execAsync });
+    expect(received.startsWith('powershell -NoProfile -Command "')).toBe(true);
+    expect(received.endsWith('"')).toBe(true);
+    // Single quotes pass through unchanged (PowerShell honors them)
+    expect(received).toContain("'/path with space/x'");
+  });
+
+  it('Windows: escapes embedded double quotes so the -Command argument stays intact', async () => {
+    let received = null;
+    const execAsync = async (cmd) => { received = cmd; return { stdout: '', stderr: '' }; };
+    await runShell('echo "hello"', { platform: 'win32', execAsync });
+    // The inner " must be escaped to \" so it doesn't terminate the -Command "..."
+    expect(received).toContain('\\"hello\\"');
+  });
+
+  it('default platform falls back to process.platform (Unix here)', async () => {
+    let received = null;
+    const execAsync = async (cmd) => { received = cmd; return { stdout: '', stderr: '' }; };
+    await runShell('ls', { execAsync });
+    expect(received).toBe('ls');
   });
 });

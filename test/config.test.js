@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { readConfig, getDefaultConfig } from '../lib/config.js';
+import { readConfig, getDefaultConfig, expandTilde } from '../lib/config.js';
 
 describe('getDefaultConfig', () => {
   it('returns sensible defaults', () => {
@@ -75,5 +75,32 @@ describe('readConfig', () => {
     const config = readConfig({});
     expect(Array.isArray(config.EXCLUDE)).toBe(true);
     expect(config.EXCLUDE).toEqual([]);
+  });
+});
+
+describe('expandTilde', () => {
+  // Regression for the critical bug: push/pull accept a user-typed BUNDLE_DIR
+  // that must be expanded BEFORE fs use. iCloud paths contain an interior ~
+  // (com~apple~) which must NOT confuse the "starts with ~" check — only a
+  // LEADING ~ is a home reference.
+  const home = '/Users/test';
+
+  it('expands a leading ~/ to home', () => {
+    expect(expandTilde('~/foo', home)).toBe('/Users/test/foo');
+  });
+
+  it('expands an iCloud path while keeping the interior com~apple~ segment', () => {
+    const out = expandTilde('~/Library/Mobile Documents/com~apple~CloudDocs/claude-sync', home);
+    expect(out).toBe('/Users/test/Library/Mobile Documents/com~apple~CloudDocs/claude-sync');
+    expect(out.startsWith('~')).toBe(false);
+  });
+
+  it('expands ~ even without a trailing slash', () => {
+    expect(expandTilde('~mybundle', home)).toBe('/Users/test/mybundle');
+  });
+
+  it('leaves absolute and Windows paths unchanged', () => {
+    expect(expandTilde('/abs/path', home)).toBe('/abs/path');
+    expect(expandTilde('C:\\Users\\x\\OneDrive', home)).toBe('C:\\Users\\x\\OneDrive');
   });
 });

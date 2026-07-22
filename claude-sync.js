@@ -17,13 +17,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { readConfig, remotePath } from './lib/config.js';
+import { readConfig, remotePath, expandTilde } from './lib/config.js';
 import { spawnSync } from 'node:child_process';
 import { prompt, promptYesNo, pickFromList } from './lib/prompt.js';
 import { pushWorkflow, pullWorkflow, readSettings, extractMcpServers, countMemoryTopics } from './lib/workflow.js';
 import { createRcloneBackend } from './backends/rclone.js';
 import { createManualBackend } from './backends/manual.js';
-import { createBaidupcsBackend } from './backends/baidupcs.js';
 import { createCustomBackend } from './backends/custom.js';
 import { readManifest, hashFile, readPluginVersions } from './lib/sync.js';
 import { detectSkills } from './lib/detect.js';
@@ -99,7 +98,7 @@ Flags:
   -v, --version                   Print version
   -h, --help                      Print this help
 
-Backends: rclone (default), baidupcs, manual, custom
+Backends: rclone (default), manual, custom
 Config:   ~/.claude-sync.conf (JSON) or ~/.claude-sync.json
 `);
 }
@@ -128,8 +127,6 @@ function createBackend(config) {
   switch (config.BACKEND) {
     case 'rclone':
       return createRcloneBackend();
-    case 'baidupcs':
-      return createBaidupcsBackend();
     case 'manual':
       return createManualBackend({ bundleDir: config.BUNDLE_DIR });
     case 'custom':
@@ -225,6 +222,137 @@ export async function initRcloneRemote(config, {
   }
 }
 
+/**
+ * Detect known cloud-sync folders that actually exist on this machine.
+ *
+ * Pure/injectable: takes home + existsSync + readdirSync + platform so tests
+ * can simulate any OS layout. Returns only directories that exist, each as
+ * {label, dir}. We probe the *sync root*; the caller appends a claude-sync
+ * subfolder.
+ *
+ * macOS note: OneDrive and Google Drive live under ~/Library/CloudStorage with
+ * a DYNAMIC suffix — OneDrive-Personal / OneDrive-<Company> and
+ * GoogleDrive-<email>. So we list CloudStorage and prefix-match rather than
+ * probing fixed names. (Verified against Microsoft/Google docs, 2026-07.)
+ *
+ * @param {object} deps
+ * @param {string} deps.home - user home directory
+ * @param {function} deps.existsSync - fs.existsSync-like predicate
+ * @param {function} [deps.readdirSync] - fs.readdirSync-like (for CloudStorage scan)
+ * @param {string} [deps.platform] - process.platform ('darwin' | 'win32' | ...)
+ * @returns {Array<{label: string, dir: string}>}
+ */
+export function detectCloudDirs({ home, existsSync, readdirSync, platform = process.platform } = {}) {
+  const found = [];
+  const add = (label, dir) => { if (dir && existsSync(dir)) found.push({ label, dir }); };
+
+  if (platform === 'darwin') {
+    add('iCloud Drive', path.join(home, 'Library', 'Mobile Documents', 'com~apple~CloudDocs'));
+
+    // Library/CloudStorage entries carry a dynamic suffix (account/company/email).
+    // List the dir and prefix-match instead of guessing exact names.
+    const cloudStorage = path.join(home, 'Library', 'CloudStorage');
+    if (readdirSync && existsSync(cloudStorage)) {
+      let entries = [];
+      try { entries = readdirSync(cloudStorage); } catch { entries = []; }
+      for (const entry of entries) {
+        let label = null;
+        if (entry.startsWith('OneDrive')) label = 'OneDrive';       // OneDrive-Personal / OneDrive-<Company>
+        else if (entry.startsWith('GoogleDrive')) label = 'Google Drive'; // GoogleDrive-<email>
+        else if (entry.startsWith('Dropbox')) label = 'Dropbox';    // Dropbox (newer macOS)
+        if (label) {
+          const suffix = entry.includes('-') ? ` (${entry.slice(entry.indexOf('-') + 1)})` : '';
+          found.push({ label: `${label}${suffix}`, dir: path.join(cloudStorage, entry) });
+        }
+      }
+    }
+  } else if (platform === 'win32') {
+    add('OneDrive', path.join(home, 'OneDrive'));
+    // iCloud for Windows: official name has a space; older variant has none.
+    add('iCloud Drive', path.join(home, 'iCloud Drive'));
+    add('iCloud Drive', path.join(home, 'iCloudDrive'));
+  }
+  // Dropbox lives in ~/Dropbox on every platform (still the mainstream default).
+  add('Dropbox', path.join(home, 'Dropbox'));
+
+  return found;
+}
+
+/**
+ * Resolve the manual-backend bundle directory during init.
+ *
+ * Pure/injectable: no console. If cloud folders are detected on this machine,
+ * offers them (via pickList) alongside the local default and a "Custom..."
+ * escape hatch. Otherwise falls back to a plain text prompt. Leading ~ is
+ * expanded; empty input keeps the platform/config default.
+ *
+ * @param {object} config - config (reads BUNDLE_DIR / HOME for defaults)
+ * @param {object} deps
+ * @param {function} deps.askText - prompt(question) => Promise<string>
+ * @param {function} [deps.pickList] - pickFromList-like (question, items, default) => Promise<string>
+ * @param {function} [deps.existsSync] - fs.existsSync-like (for cloud detection)
+ * @param {function} [deps.readdirSync] - fs.readdirSync-like (for CloudStorage scan)
+ * @param {string} [deps.platform] - process.platform override for tests
+ * @param {string} [deps.home] - home dir for ~ expansion / detection
+ * @returns {Promise<string>} the resolved absolute bundle directory
+ */
+export async function resolveManualBundleDir(config, { askText, pickList, existsSync, readdirSync, platform, home } = {}) {
+  const h = home || config.HOME || os.homedir();
+  const defaultBundle = config.BUNDLE_DIR || path.join(h, '.claude-sync-bundle');
+
+  // Offer detected cloud folders as ready-made choices when we can probe the FS.
+  const clouds = (pickList && existsSync)
+    ? detectCloudDirs({ home: h, existsSync, readdirSync, platform })
+    : [];
+
+  if (clouds.length > 0) {
+    const CUSTOM = 'Custom path...';
+    const LOCAL = `Local only (${defaultBundle})`;
+    // Each cloud gets a claude-sync/ subfolder so the sync root stays clean.
+    const cloudChoices = clouds.map(c => ({ label: `${c.label} — ${path.join(c.dir, 'claude-sync')}`, dir: path.join(c.dir, 'claude-sync') }));
+    const items = [...cloudChoices.map(c => c.label), LOCAL, CUSTOM];
+    const chosen = await pickList('Where should the bundle live?', items, cloudChoices[0].label);
+
+    if (chosen === CUSTOM) {
+      const answer = await askText(`Bundle directory [${defaultBundle}]: `);
+      return (answer && answer.trim()) ? expandTilde(answer.trim(), h) : defaultBundle;
+    }
+    if (chosen === LOCAL) return defaultBundle;
+    const match = cloudChoices.find(c => c.label === chosen);
+    return match ? match.dir : defaultBundle;
+  }
+
+  // No cloud detected (or FS not probeable): plain text prompt.
+  const answer = await askText(`Bundle directory [${defaultBundle}]: `);
+  return (answer && answer.trim())
+    ? expandTilde(answer.trim(), h)
+    : defaultBundle;
+}
+
+/**
+ * Confirm (or override) the manual-backend bundle directory during push/pull.
+ *
+ * Pure/injectable: no fs, no console. Shows the current dir, lets the user press
+ * Enter to keep it or type a new path (leading ~ expanded). Reports whether the
+ * value changed so the caller can decide to persist.
+ *
+ * @param {object} config - config (reads BUNDLE_DIR / HOME)
+ * @param {object} deps
+ * @param {function} deps.askText - prompt(question) => Promise<string>
+ * @param {string} deps.verb - shown in the prompt, e.g. 'saved to' or 'pulled from'
+ * @param {string} [deps.home] - home dir for ~ expansion
+ * @returns {Promise<{bundleDir: string, changed: boolean}>}
+ */
+export async function confirmManualBundleDir(config, { askText, verb = 'saved to', home } = {}) {
+  const h = home || config.HOME || os.homedir();
+  const cur = config.BUNDLE_DIR || path.join(h, '.claude-sync-bundle');
+  const answer = await askText(`Bundle will be ${verb} [${cur}] (Enter to confirm, or type another path): `);
+  if (answer && answer.trim() && answer.trim() !== cur) {
+    return { bundleDir: expandTilde(answer.trim(), h), changed: true };
+  }
+  return { bundleDir: cur, changed: false };
+}
+
 async function runInit(config) {
   console.log('╔══════════════════════════════════╗');
   console.log('║   claude-sync — interactive init ║');
@@ -232,7 +360,7 @@ async function runInit(config) {
   console.log();
 
   // 1. Choose backend (loops back on 'user_back' from rclone init)
-  const BACKEND_OPTIONS = ['rclone', 'baidupcs', 'manual', 'custom'];
+  const BACKEND_OPTIONS = ['rclone', 'manual', 'custom'];
   let backend;
   let statusMsg = null;
   const finalConfig = { ...config };
@@ -250,7 +378,6 @@ async function runInit(config) {
       [
         'Available backends:',
         '  rclone    — 40+ cloud drives (Dropbox/GDrive/OneDrive/S3/WebDAV...)',
-        '  baidupcs  — Baidu Netdisk (China users)',
         '  manual    — No CLI needed, handle files yourself (iCloud)',
         '  custom    — Your own upload/download commands'
       ],
@@ -275,42 +402,35 @@ async function runInit(config) {
         continue;
       }
       break;
-    } else if (backend === 'baidupcs') {
-    console.log();
-    console.log('Checking BaiduPCS-Go...');
-    try {
-      const bpBackend = createBaidupcsBackend();
-      let loggedIn = await bpBackend.checkLogin();
-      console.log(`  ${loggedIn ? '✓ Logged in' : '✗ Not logged in'}`);
-      if (!loggedIn) {
-        const doLogin = await promptYesNo('Run BaiduPCS-Go login now?', true);
-        if (doLogin) {
-          spawnSync('BaiduPCS-Go', ['login'], { stdio: 'inherit' });
-          loggedIn = await bpBackend.checkLogin();
-          console.log(`  ${loggedIn ? '✓ Login successful' : '✗ Login failed — check your credentials'}`);
-        }
-      }
-    } catch {
-      console.log('  BaiduPCS-Go not found. Install: https://github.com/qjfoidnh/BaiduPCS-Go');
+    } else if (backend === 'custom') {
+      console.log();
+      console.log('Custom backend — define your own upload/download shell commands.');
+      console.log('Use {file} for the local file path and {remote} for the remote path.');
+      console.log();
+      console.log('Examples:');
+      console.log('  rsync {file} user@nas:/backup/{remote}');
+      console.log('  aws s3 cp {file} s3://my-bucket/claude-sync/{remote}');
+      console.log('  scp {file} my-server:/data/claude-sync/bundle.tar.gz');
+      console.log();
+      const upCmd = await prompt('Upload command: ');
+      if (upCmd.trim()) finalConfig.UPLOAD_CMD = upCmd.trim();
+      const downCmd = await prompt('Download command: ');
+      if (downCmd.trim()) finalConfig.DOWNLOAD_CMD = downCmd.trim();
+    } else if (backend === 'manual') {
+      console.log();
+      console.log('Manual backend — claude-sync only packs/unpacks; you move the bundle yourself.');
+      console.log('Point the bundle dir at any folder: an iCloud/OneDrive sync folder, a USB');
+      console.log('stick, or anywhere you like. claude-sync does not care what is behind it.');
+      console.log();
+      finalConfig.BUNDLE_DIR = await resolveManualBundleDir(config, {
+        askText: prompt,
+        pickList: pickFromList,
+        existsSync: fs.existsSync,
+        readdirSync: fs.readdirSync
+      });
     }
-    finalConfig.REMOTE = '/';
-  } else if (backend === 'custom') {
-    console.log();
-    console.log('Custom backend — define your own upload/download shell commands.');
-    console.log('Use {file} for the local file path and {remote} for the remote path.');
-    console.log();
-    console.log('Examples:');
-    console.log('  rsync {file} user@nas:/backup/{remote}');
-    console.log('  aws s3 cp {file} s3://my-bucket/claude-sync/{remote}');
-    console.log('  scp {file} my-server:/data/claude-sync/bundle.tar.gz');
-    console.log();
-    const upCmd = await prompt('Upload command: ');
-    if (upCmd.trim()) finalConfig.UPLOAD_CMD = upCmd.trim();
-    const downCmd = await prompt('Download command: ');
-    if (downCmd.trim()) finalConfig.DOWNLOAD_CMD = downCmd.trim();
-  }
-  // Non-rclone backends: configured, exit the selection loop
-  break;
+    // Non-rclone backends: configured, exit the selection loop
+    break;
   }
 
   // 3. Machine ID
@@ -332,6 +452,7 @@ async function runInit(config) {
   // 5. Save config
   const configPath = path.join((config.HOME || os.homedir()), '.claude-sync.json');
   const toSave = { REMOTE: finalConfig.REMOTE, BACKEND: finalConfig.BACKEND, MACHINE_ID: finalConfig.MACHINE_ID };
+  if (finalConfig.BUNDLE_DIR) toSave.BUNDLE_DIR = finalConfig.BUNDLE_DIR;
   if (finalConfig.UPLOAD_CMD) toSave.UPLOAD_CMD = finalConfig.UPLOAD_CMD;
   if (finalConfig.DOWNLOAD_CMD) toSave.DOWNLOAD_CMD = finalConfig.DOWNLOAD_CMD;
   fs.writeFileSync(configPath, JSON.stringify(toSave, null, 2));
@@ -347,14 +468,18 @@ async function runPush(config, backend, flags) {
   // Ask folder path and secrets mode every push
   const configPath = path.join((config.HOME || os.homedir()), '.claude-sync.json');
 
-  const folder = await pickFromList(
-    'Folder path on remote:',
-    ['claude-sync/', 'Custom...'],
-    config.REMOTE_FOLDER || 'claude-sync/'
-  );
-  config.REMOTE_FOLDER = (folder === 'Custom...')
-    ? ((await prompt('Enter folder path: ')).trim() || 'claude-sync/')
-    : folder;
+  // Remote folder only matters for backends that write to a shared remote.
+  // manual writes straight into BUNDLE_DIR, so skip this prompt for it.
+  if (config.BACKEND !== 'manual') {
+    const folder = await pickFromList(
+      'Folder path on remote:',
+      ['claude-sync/', 'Custom...'],
+      config.REMOTE_FOLDER || 'claude-sync/'
+    );
+    config.REMOTE_FOLDER = (folder === 'Custom...')
+      ? ((await prompt('Enter folder path: ')).trim() || 'claude-sync/')
+      : folder;
+  }
 
   config.SECRETS = await pickFromList(
     'Secrets mode:',
@@ -367,11 +492,18 @@ async function runPush(config, backend, flags) {
     ]
   );
 
-  // Persist choices
+  // Manual backend: confirm/override the bundle directory each push
+  if (config.BACKEND === 'manual') {
+    const { bundleDir } = await confirmManualBundleDir(config, { askText: prompt, verb: 'saved to' });
+    config.BUNDLE_DIR = bundleDir;
+  }
+
+  // Persist choices (single read-modify-write)
   try {
     const existing = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-    existing.REMOTE_FOLDER = config.REMOTE_FOLDER;
     existing.SECRETS = config.SECRETS;
+    if (config.BACKEND === 'manual') existing.BUNDLE_DIR = config.BUNDLE_DIR;
+    else existing.REMOTE_FOLDER = config.REMOTE_FOLDER;
     fs.writeFileSync(configPath, JSON.stringify(existing, null, 2));
   } catch { /* config file not found, skip save */ }
 
@@ -400,38 +532,49 @@ async function runPull(config, backend, flags) {
   // Ask which folder to pull from (avoid pulling from wrong one when multiple exist)
   const configPath = path.join((config.HOME || os.homedir()), '.claude-sync.json');
 
-  let folderOptions = ['claude-sync/', 'Custom...'];
-  let defaultFolder = config.REMOTE_FOLDER || 'claude-sync/';
+  // Remote folder prompt only applies to backends that read from a shared remote.
+  // manual reads straight from BUNDLE_DIR, so skip entirely for it.
+  if (config.BACKEND !== 'manual') {
+    let folderOptions = ['claude-sync/', 'Custom...'];
+    let defaultFolder = config.REMOTE_FOLDER || 'claude-sync/';
 
-  // Try to list folders from the remote
-  if (config.BACKEND === 'rclone' && config.REMOTE) {
-    try {
-      const remoteName = config.REMOTE.replace(/:$/, '');
-      const remoteFolders = await backend.listFolders(remoteName);
-      if (remoteFolders.length > 0) {
-        folderOptions = [...remoteFolders, 'Custom...'];
-        if (remoteFolders.includes(defaultFolder)) {
-          // Keep defaultFolder as-is (it exists on remote)
-        } else if (remoteFolders.length > 0) {
-          defaultFolder = remoteFolders[0];
+    // Try to list folders from the remote
+    if (config.BACKEND === 'rclone' && config.REMOTE) {
+      try {
+        const remoteName = config.REMOTE.replace(/:$/, '');
+        const remoteFolders = await backend.listFolders(remoteName);
+        if (remoteFolders.length > 0) {
+          folderOptions = [...remoteFolders, 'Custom...'];
+          if (remoteFolders.includes(defaultFolder)) {
+            // Keep defaultFolder as-is (it exists on remote)
+          } else if (remoteFolders.length > 0) {
+            defaultFolder = remoteFolders[0];
+          }
         }
-      }
-    } catch { /* backend doesn't support listFolders, use defaults */ }
+      } catch { /* backend doesn't support listFolders, use defaults */ }
+    }
+
+    const folder = await pickFromList(
+      'Pull from folder:',
+      folderOptions,
+      defaultFolder
+    );
+    config.REMOTE_FOLDER = (folder === 'Custom...')
+      ? ((await prompt('Enter folder path: ')).trim() || 'claude-sync/')
+      : folder;
   }
 
-  const folder = await pickFromList(
-    'Pull from folder:',
-    folderOptions,
-    defaultFolder
-  );
-  config.REMOTE_FOLDER = (folder === 'Custom...')
-    ? ((await prompt('Enter folder path: ')).trim() || 'claude-sync/')
-    : folder;
+  // Manual backend: confirm where the bundle lives (you must have placed it there)
+  if (config.BACKEND === 'manual') {
+    const { bundleDir } = await confirmManualBundleDir(config, { askText: prompt, verb: 'pulled from' });
+    config.BUNDLE_DIR = bundleDir;
+  }
 
-  // Persist choice
+  // Persist choices (single read-modify-write)
   try {
     const existing = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-    existing.REMOTE_FOLDER = config.REMOTE_FOLDER;
+    if (config.BACKEND === 'manual') existing.BUNDLE_DIR = config.BUNDLE_DIR;
+    else existing.REMOTE_FOLDER = config.REMOTE_FOLDER;
     fs.writeFileSync(configPath, JSON.stringify(existing, null, 2));
   } catch { /* skip */ }
 

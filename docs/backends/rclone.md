@@ -58,5 +58,4 @@ claude-sync init
 
 ## 注意事项
 
-- rclone 不原生支持百度网盘，请用 `baidupcs` 后端
 - 首次使用需先执行 `rclone config` 配置云盘

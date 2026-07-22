@@ -1,6 +1,6 @@
 # claude-sync
 
-中文 | [English](README.en.md)
+中文 | [English](README.en.md) | [GitHub](https://github.com/wanghaifengnihaoa/claude-sync)
 
 Claude Code 跨机器配置同步工具。
 
@@ -10,7 +10,7 @@ Claude Code 跨机器配置同步工具。
 
 ## 功能
 
-- **可插拔后端** — rclone（40+ 云盘）、百度网盘、iCloud/手动、自定义命令
+- **可插拔后端** — rclone（40+ 云盘）、manual（自动探测 iCloud/OneDrive 等本地同步文件夹）、自定义命令
 - **密钥处理** — `keep`（随包原样传输，依赖云盘传输加密）或 `strip`（替换为 `***` 占位符）
 - **智能合并** — `--cover`（完全同步）或 `--keep`（只补缺）。绝不盲目覆盖
 - **自动识别** — 5 种 skill 类型：skills.sh、git 仓库、symlink、子 symlink、普通目录
@@ -50,8 +50,7 @@ claude-sync pull     # 下载并合并配置
 | 后端 | 适用 | 准备工作 |
 |---------|---------|---------|
 | **rclone**（默认） | Dropbox、Google Drive、OneDrive、S3、坚果云 WebDAV 等 | 先执行 `rclone config` |
-| **baidupcs** | 百度网盘 | 先执行 `BaiduPCS-Go login` |
-| **manual** | iCloud Drive、任意同步文件夹 | 将 BUNDLE_DIR 设为同步目录 |
+| **manual** | iCloud Drive、OneDrive、任意同步文件夹、U 盘 | init 时选择/填写打包目录 |
 | **custom** | 自定义上传/下载命令 | 配置 UPLOAD_CMD / DOWNLOAD_CMD |
 
 ### 云盘快速参考
@@ -60,8 +59,35 @@ claude-sync pull     # 下载并合并配置
 |-------|---------|--------|
 | Dropbox / GDrive / OneDrive / S3 | `rclone` | `myremote:claude-sync/` |
 | 坚果云 | `rclone`（WebDAV） | `mynutstore:claude-sync/` |
-| 百度网盘 | `baidupcs` | `/claude-sync` |
-| iCloud Drive | `manual` | 留空（设定 BUNDLE_DIR 即可） |
+| iCloud Drive / OneDrive（本地同步文件夹） | `manual` | 设定 BUNDLE_DIR 为同步目录 |
+
+### manual 后端（无需 CLI，靠本地同步文件夹）
+
+manual 后端本身不联网：claude-sync 只负责把配置**打包/解包到一个本地目录**（`BUNDLE_DIR`），上传下载交给那个目录背后的同步机制（iCloud、OneDrive、Dropbox 等会自动同步它）。claude-sync 不关心目录背后是什么。
+
+`claude-sync init` 选 `manual` 时会**自动探测本机已安装的云盘目录**，让你直接选：
+
+```
+Where should the bundle live?
+
+  1) iCloud Drive — ~/Library/Mobile Documents/com~apple~CloudDocs/claude-sync
+  2) OneDrive (Personal) — ~/Library/CloudStorage/OneDrive-Personal/claude-sync
+  3) Local only (~/.claude-sync-bundle)
+  4) Custom path...
+```
+
+探测范围：
+
+| 平台 | 探测的云盘目录 |
+|------|---------------|
+| macOS | iCloud Drive（`~/Library/Mobile Documents/com~apple~CloudDocs`）、OneDrive / Google Drive（`~/Library/CloudStorage/`，自动识别账号后缀）、Dropbox |
+| Windows | OneDrive（`~/OneDrive`）、iCloud Drive（`~/iCloud Drive`）、Dropbox |
+
+探测不到时可选 `Custom path...` 手动填任意路径（支持 `~` 展开）。之后每次 `push`/`pull` 会显示当前打包目录让你确认，也可临时改到别的路径。
+
+**两台机器要指向同一个云盘子目录**：源机 push 进去 → 等云盘同步完 → 目标机确认文件已同步下来后 pull。
+
+跨平台时路径可以不同（Mac 的 iCloud 路径 vs Windows 的 iCloud 路径），只要它们背后是同一个云盘账号、内容会被同步成一致即可。
 
 ## 配置
 
@@ -93,7 +119,7 @@ claude-sync pull     # 下载并合并配置
 
 ### `keep` 模式（默认）
 
-密钥随 tar.gz 包原样传输。使用私有云盘后端时安全（rclone 自己的账号、百度网盘私有空间）。
+密钥随 tar.gz 包原样传输。使用私有云盘后端时安全（如 rclone 自己的账号）。
 
 ### `strip` 模式
 

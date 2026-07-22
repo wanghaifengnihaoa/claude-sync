@@ -11,12 +11,47 @@ import { withRetry, log } from '../lib/retry.js';
 const execAsync = promisify(exec);
 
 /**
+ * Run a shell command on the appropriate platform shell.
+ *
+ * Why this exists: shellEscape() wraps values in SINGLE quotes, which only
+ * Unix shells understand. Windows' default shell (cmd.exe) does not treat
+ * single quotes as quote characters, so a path with spaces (or a single
+ * quote) breaks. PowerShell DOES honor single quotes, so on Windows we run
+ * the command through `powershell -c` to keep the same escaping working
+ * cross-platform. On macOS/Linux we hand the command straight to /bin/sh.
+ *
+ * @param {string} cmd - fully-formed command string (already shellEscaped)
+ * @param {object} [opts]
+ * @param {string} [opts.platform] - process.platform override (for tests)
+ * @param {function} [opts.execAsync] - promisified exec override (for tests)
+ * @returns {Promise<{stdout: string, stderr: string}>}
+ */
+export async function runShell(cmd, { platform = process.platform, execAsync: doExec = execAsync } = {}) {
+  if (platform === 'win32') {
+    // PowerShell -Command with the whole command as one argument. We must escape
+    // any embedded double quotes so the -c argument stays intact; single quotes
+    // inside the command are passed through unchanged (PowerShell honors them).
+    const psCmd = cmd.replace(/"/g, '\\"');
+    return doExec(`powershell -NoProfile -Command "${psCmd}"`);
+  }
+  return doExec(cmd);
+}
+
+/**
  * Create a custom backend with user-defined commands.
  * @param {object} config - backend config with UPLOAD_CMD / DOWNLOAD_CMD
- * @param {function} [execFn] - injectable exec function for testing
+ * @param {function} [execFn] - injectable exec function for testing.
+ *        Signature: async (cmd) => { stdout, stderr }. When provided, runs the
+ *        raw command directly (bypassing runShell) so tests can assert cmd text.
+ * @param {object} [opts] - extra options
+ * @param {string} [opts.platform] - process.platform override (for runShell)
  */
-export function createCustomBackend(config, execFn) {
-  const _exec = execFn || execAsync;
+export function createCustomBackend(config, execFn, opts = {}) {
+  // Injected execFn (tests) runs the command verbatim; otherwise route through
+  // runShell so Windows picks up PowerShell and Unix uses /bin/sh.
+  const _exec = execFn
+    ? (cmd) => execFn(cmd)
+    : (cmd) => runShell(cmd, { platform: opts.platform });
   const uploadCmd = config.UPLOAD_CMD || '';
   const downloadCmd = config.DOWNLOAD_CMD || '';
 

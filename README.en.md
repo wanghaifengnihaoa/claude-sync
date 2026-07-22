@@ -1,6 +1,6 @@
 # claude-sync
 
-[中文](README.md) | English
+[中文](README.md) | English | [GitHub](https://github.com/wanghaifengnihaoa/claude-sync)
 
 Cross-machine sync tool for [Claude Code](https://claude.ai/code) configurations.
 
@@ -10,7 +10,7 @@ Cross-machine sync tool for [Claude Code](https://claude.ai/code) configurations
 
 ## Features
 
-- **Pluggable backends** — rclone (40+ cloud drives), Baidu Netdisk, iCloud/manual, custom commands
+- **Pluggable backends** — rclone (40+ cloud drives), manual (auto-detects iCloud/OneDrive and other local sync folders), custom commands
 - **Secret handling** — `keep` (transmitted as-is; your cloud provider encrypts transport) or `strip` (`***` placeholders)
 - **Smart merging** — `--cover` (full sync) or `--keep` (only fill gaps). Never blindly overwrites.
 - **Auto-detection** — 5 skill types recognized: skills.sh, git repos, symlinks, child symlinks, plain
@@ -50,8 +50,7 @@ claude-sync pull     # download & merge
 | Backend | Use for | Setup |
 |---------|---------|-------|
 | **rclone** (default) | Dropbox, Google Drive, OneDrive, S3, WebDAV (Nutstore), etc. | `rclone config` first |
-| **baidupcs** | Baidu Netdisk (China) | `BaiduPCS-Go login` first |
-| **manual** | iCloud Drive, any sync folder | Set BUNDLE_DIR to your sync folder |
+| **manual** | iCloud Drive, OneDrive, any sync folder, USB stick | Pick/enter a bundle dir at init |
 | **custom** | Your own upload/download commands | Set UPLOAD_CMD / DOWNLOAD_CMD |
 
 ### Cloud quick reference
@@ -60,8 +59,42 @@ claude-sync pull     # download & merge
 |-------|---------|--------|
 | Dropbox / GDrive / OneDrive / S3 | `rclone` | `myremote:claude-sync/` |
 | Nutstore (坚果云) | `rclone` (WebDAV) | `mynutstore:claude-sync/` |
-| Baidu Netdisk (百度网盘) | `baidupcs` | `/claude-sync` |
-| iCloud Drive | `manual` | (leave empty, set BUNDLE_DIR) |
+| iCloud Drive / OneDrive (local sync folder) | `manual` | set BUNDLE_DIR to the sync folder |
+
+### Manual backend (no CLI, uses a local sync folder)
+
+The manual backend never touches the network: claude-sync only packs/unpacks the
+config into a local directory (`BUNDLE_DIR`), and whatever syncs that directory
+(iCloud, OneDrive, Dropbox…) does the upload/download. claude-sync doesn't care
+what's behind the folder.
+
+When you pick `manual` in `claude-sync init`, it **auto-detects cloud folders
+installed on this machine** and lets you choose:
+
+```
+Where should the bundle live?
+
+  1) iCloud Drive — ~/Library/Mobile Documents/com~apple~CloudDocs/claude-sync
+  2) OneDrive (Personal) — ~/Library/CloudStorage/OneDrive-Personal/claude-sync
+  3) Local only (~/.claude-sync-bundle)
+  4) Custom path...
+```
+
+Detection scope:
+
+| Platform | Cloud folders probed |
+|----------|---------------------|
+| macOS | iCloud Drive (`~/Library/Mobile Documents/com~apple~CloudDocs`), OneDrive / Google Drive (`~/Library/CloudStorage/`, account suffix auto-detected), Dropbox |
+| Windows | OneDrive (`~/OneDrive`), iCloud Drive (`~/iCloud Drive`), Dropbox |
+
+Nothing detected? Choose `Custom path...` and type any path (with `~` expansion).
+Each `push`/`pull` then shows the current bundle dir to confirm, and lets you
+redirect it on the fly.
+
+**Point both machines at the same cloud subfolder**: source pushes into it → wait
+for the cloud to sync → target confirms the files arrived, then pulls. The path
+may differ per platform (Mac vs Windows iCloud paths) as long as the same cloud
+account keeps their contents in sync.
 
 ## Configuration
 
@@ -81,7 +114,7 @@ All options have sensible defaults — only `REMOTE` is required (except for man
 | Option | Default | Description |
 |--------|---------|-------------|
 | `REMOTE` | — | Backend-specific remote path |
-| `BACKEND` | `rclone` | rclone / baidupcs / manual / custom |
+| `BACKEND` | `rclone` | rclone / manual / custom |
 | `SECRETS` | `keep` | keep (transmit as-is) / strip (replace with `***`) |
 | `MACHINE_ID` | hostname | Machine identifier for conflict detection |
 | `EXCLUDE` | (empty) | Extra exclude patterns |
@@ -106,7 +139,7 @@ All options have sensible defaults — only `REMOTE` is required (except for man
 
 ### `keep` mode (default)
 
-Secrets are transmitted as-is inside the tar.gz bundle. Safe when using a private cloud backend (rclone with your own account, Baidu Netdisk private space).
+Secrets are transmitted as-is inside the tar.gz bundle. Safe when using a private cloud backend (e.g. rclone with your own account).
 
 ### `strip` mode
 
