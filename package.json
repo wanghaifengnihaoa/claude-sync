@@ -1,6 +1,6 @@
 {
   "name": "@whfnihaoa/claude-sync",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Claude Code 跨机器配置同步工具",
   "main": "claude-sync.js",
   "bin": {
