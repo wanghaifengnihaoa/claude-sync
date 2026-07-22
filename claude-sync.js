@@ -353,6 +353,36 @@ export async function confirmManualBundleDir(config, { askText, verb = 'saved to
   return { bundleDir: cur, changed: false };
 }
 
+/**
+ * Build the config object that `claude-sync init` persists to disk.
+ *
+ * Rebuilt from scratch for the chosen backend, so re-running init (e.g.
+ * switching backends) never leaves fields from a previous backend behind in
+ * ~/.claude-sync.json. Only fields that belong to the current backend are
+ * kept; anything else carried over from the previously loaded config is
+ * dropped — this is what "clear the local config before writing" means in
+ * practice, since writeFileSync overwrites the file wholesale.
+ *
+ * @param {object} finalConfig - the config accumulated during the init flow
+ * @returns {object} a clean config safe to write to ~/.claude-sync.json
+ */
+export function buildInitConfig(finalConfig) {
+  const backend = finalConfig.BACKEND;
+  const toSave = {
+    BACKEND: backend,
+    MACHINE_ID: finalConfig.MACHINE_ID
+  };
+  if (backend === 'rclone') {
+    if (finalConfig.REMOTE) toSave.REMOTE = finalConfig.REMOTE;
+  } else if (backend === 'manual') {
+    if (finalConfig.BUNDLE_DIR) toSave.BUNDLE_DIR = finalConfig.BUNDLE_DIR;
+  } else if (backend === 'custom') {
+    if (finalConfig.UPLOAD_CMD) toSave.UPLOAD_CMD = finalConfig.UPLOAD_CMD;
+    if (finalConfig.DOWNLOAD_CMD) toSave.DOWNLOAD_CMD = finalConfig.DOWNLOAD_CMD;
+  }
+  return toSave;
+}
+
 async function runInit(config) {
   console.log('╔══════════════════════════════════╗');
   console.log('║   claude-sync — interactive init ║');
@@ -449,12 +479,10 @@ async function runInit(config) {
   if (fs.existsSync(homeClaudeMd)) console.log(`  Found: ~/CLAUDE.md`);
   if (fs.existsSync(claudeDirMd)) console.log(`  Found: ~/.claude/CLAUDE.md`);
 
-  // 5. Save config
+  // 5. Save config — rebuilt from scratch for the chosen backend (see
+  // buildInitConfig) so switching backends never leaves stale fields behind.
   const configPath = path.join((config.HOME || os.homedir()), '.claude-sync.json');
-  const toSave = { REMOTE: finalConfig.REMOTE, BACKEND: finalConfig.BACKEND, MACHINE_ID: finalConfig.MACHINE_ID };
-  if (finalConfig.BUNDLE_DIR) toSave.BUNDLE_DIR = finalConfig.BUNDLE_DIR;
-  if (finalConfig.UPLOAD_CMD) toSave.UPLOAD_CMD = finalConfig.UPLOAD_CMD;
-  if (finalConfig.DOWNLOAD_CMD) toSave.DOWNLOAD_CMD = finalConfig.DOWNLOAD_CMD;
+  const toSave = buildInitConfig(finalConfig);
   fs.writeFileSync(configPath, JSON.stringify(toSave, null, 2));
   console.log();
   console.log(`✓ Configuration saved to ${configPath}`);

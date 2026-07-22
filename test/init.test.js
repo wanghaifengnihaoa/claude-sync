@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { initRcloneRemote, resolveManualBundleDir, confirmManualBundleDir, detectCloudDirs } from '../claude-sync.js';
+import { initRcloneRemote, resolveManualBundleDir, confirmManualBundleDir, detectCloudDirs, buildInitConfig } from '../claude-sync.js';
 import path from 'node:path';
 import { remotePath } from '../lib/config.js';
 import os from 'node:os';
@@ -344,5 +344,86 @@ describe('runInit loop cursor management', () => {
     stdout.write('PICK_LIST_OUTPUT_2');
     const restorePattern = '\x1b8\x1b[J';
     expect(writes.filter(w => w === restorePattern).length).toBe(2);
+  });
+});
+
+// ================================================================
+// buildInitConfig — clean config written by `claude-sync init`
+// ================================================================
+// init must rebuild the saved config from scratch for the chosen backend so
+// that re-running init (e.g. switching rclone → manual) never leaves fields
+// from the previous backend behind in ~/.claude-sync.json.
+describe('buildInitConfig', () => {
+  it('manual backend drops stale REMOTE/UPLOAD_CMD/DOWNLOAD_CMD from a previous init', () => {
+    // Previously ran init with rclone + custom; those fields still sit in the
+    // loaded config. Switching to manual must not persist them.
+    const finalConfig = {
+      BACKEND: 'manual',
+      MACHINE_ID: 'mac-1',
+      BUNDLE_DIR: '/icloud/claude-sync',
+      REMOTE: 'gdrive:',          // stale — prior rclone init
+      UPLOAD_CMD: 'rsync x',      // stale — prior custom init
+      DOWNLOAD_CMD: 'scp x'       // stale — prior custom init
+    };
+    expect(buildInitConfig(finalConfig)).toEqual({
+      BACKEND: 'manual',
+      MACHINE_ID: 'mac-1',
+      BUNDLE_DIR: '/icloud/claude-sync'
+    });
+  });
+
+  it('rclone backend drops stale BUNDLE_DIR/UPLOAD_CMD/DOWNLOAD_CMD', () => {
+    const finalConfig = {
+      BACKEND: 'rclone',
+      MACHINE_ID: 'mac-1',
+      REMOTE: 'gdrive:',
+      BUNDLE_DIR: '/old/bundle',  // stale — prior manual init
+      UPLOAD_CMD: 'rsync x',      // stale — prior custom init
+      DOWNLOAD_CMD: 'scp x'       // stale — prior custom init
+    };
+    expect(buildInitConfig(finalConfig)).toEqual({
+      BACKEND: 'rclone',
+      MACHINE_ID: 'mac-1',
+      REMOTE: 'gdrive:'
+    });
+  });
+
+  it('custom backend drops stale REMOTE/BUNDLE_DIR', () => {
+    const finalConfig = {
+      BACKEND: 'custom',
+      MACHINE_ID: 'mac-1',
+      UPLOAD_CMD: 'rsync {file} nas:{remote}',
+      DOWNLOAD_CMD: 'scp nas:{remote} {file}',
+      REMOTE: 'gdrive:',          // stale — prior rclone init
+      BUNDLE_DIR: '/old/bundle'   // stale — prior manual init
+    };
+    expect(buildInitConfig(finalConfig)).toEqual({
+      BACKEND: 'custom',
+      MACHINE_ID: 'mac-1',
+      UPLOAD_CMD: 'rsync {file} nas:{remote}',
+      DOWNLOAD_CMD: 'scp nas:{remote} {file}'
+    });
+  });
+
+  it('always keeps BACKEND and MACHINE_ID regardless of backend', () => {
+    const toSave = buildInitConfig({ BACKEND: 'rclone', MACHINE_ID: 'host-7', REMOTE: 'dropbox:' });
+    expect(toSave.BACKEND).toBe('rclone');
+    expect(toSave.MACHINE_ID).toBe('host-7');
+  });
+
+  it('does not write REMOTE when rclone init left it unset', () => {
+    const toSave = buildInitConfig({ BACKEND: 'rclone', MACHINE_ID: 'h' });
+    expect(toSave).not.toHaveProperty('REMOTE');
+  });
+
+  it('does not write BUNDLE_DIR when manual path is empty', () => {
+    const toSave = buildInitConfig({ BACKEND: 'manual', MACHINE_ID: 'h' });
+    expect(toSave).not.toHaveProperty('BUNDLE_DIR');
+  });
+
+  it('does not write UPLOAD_CMD/DOWNLOAD_CMD when custom left them blank', () => {
+    const toSave = buildInitConfig({ BACKEND: 'custom', MACHINE_ID: 'h' });
+    expect(toSave).not.toHaveProperty('UPLOAD_CMD');
+    expect(toSave).not.toHaveProperty('DOWNLOAD_CMD');
   });
 });
