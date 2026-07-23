@@ -619,20 +619,28 @@ async function runPull(config, backend, flags) {
   }
 }
 
-async function runStatus(config, backend) {
+export async function runStatus(config, backend) {
   console.log('Status: comparing local config with remote...');
   console.log();
 
   try {
-    if (config.BACKEND === 'manual') {
-      console.log('Manual backend: cannot auto-fetch remote manifest.');
-      console.log(`Place the remote manifest.json in ${config.BUNDLE_DIR} and run again.`);
-      return;
-    }
+    let manifest;
 
-    const tmpManifest = path.join(config.BUNDLE_DIR, 'status-manifest.json');
-    await backend.download(remotePath(config, 'manifest.json'), tmpManifest);
-    const manifest = readManifest(tmpManifest);
+    if (config.BACKEND === 'manual') {
+      // Read manifest directly from BUNDLE_DIR (user places files there)
+      const localManifest = path.join(config.BUNDLE_DIR, 'manifest.json');
+      if (!fs.existsSync(localManifest)) {
+        console.log(`Manual backend: place manifest.json in ${config.BUNDLE_DIR}`);
+        console.log('Then run status again.');
+        return;
+      }
+      manifest = readManifest(localManifest);
+    } else {
+      const tmpManifest = path.join(config.BUNDLE_DIR, 'status-manifest.json');
+      await backend.download(remotePath(config, 'manifest.json'), tmpManifest);
+      manifest = readManifest(tmpManifest);
+      try { fs.unlinkSync(tmpManifest); } catch {}
+    }
 
     if (!manifest) {
       console.log('No remote data found. Push first from your source machine.');
@@ -643,6 +651,8 @@ async function runStatus(config, backend) {
     console.log(`Remote pushed at: ${manifest.pushed_at}`);
     console.log(`Source user: ${manifest.source_user}`);
     console.log();
+
+    let differences = 0;  // count of local-vs-remote mismatches, for the final summary
 
     // === File comparison ===
     console.log('── Files ──');
@@ -666,17 +676,31 @@ async function runStatus(config, backend) {
         const localHash = hashFile(localPath);
         const status = localHash === remoteHash ? '  ' : '~ ';
         console.log(`${status}${file}`);
+        if (status === '~ ') differences++;
       } else {
         console.log(`+  ${file} (remote only)`);
+        differences++;
       }
     }
 
     // Check for files present locally but not in manifest
-    for (const localFile of ['settings.json', 'settings.local.json', 'keybindings.json']) {
-      if (manifest.hashes && !manifest.hashes[localFile]) {
-        const localPath = path.join(config.CLAUDE_DIR, localFile);
+    // Local-only files: scan CLAUDE_DIR for .json files + check CLAUDE.md at both paths
+    const allLocalPaths = [];
+    try {
+      for (const d of fs.readdirSync(config.CLAUDE_DIR, { withFileTypes: true })) {
+        if (d.isFile() && d.name.endsWith('.json')) {
+          allLocalPaths.push({ key: d.name, localPath: path.join(config.CLAUDE_DIR, d.name) });
+        }
+      }
+    } catch {}
+    allLocalPaths.push({ key: 'CLAUDE_home.md', localPath: path.join((config.HOME || os.homedir()), 'CLAUDE.md') });
+    allLocalPaths.push({ key: 'CLAUDE_claude.md', localPath: path.join(config.CLAUDE_DIR, 'CLAUDE.md') });
+
+    for (const { key, localPath } of allLocalPaths) {
+      if (manifest.hashes && !manifest.hashes[key]) {
         if (fs.existsSync(localPath)) {
-          console.log(`-  ${localFile} (local only)`);
+          console.log(`-  ${key} (local only)`);
+          differences++;
         }
       }
     }
@@ -702,12 +726,15 @@ async function runStatus(config, backend) {
         const remoteVer = manifest.plugins?.[name];
         if (!localVer) {
           console.log(`+  ${name}@${remoteVer} (remote only)`);
+          differences++;
         } else if (!remoteVer) {
           console.log(`-  ${name}@${localVer} (local only)`);
+          differences++;
         } else if (localVer === remoteVer) {
           console.log(`   ${name}@${localVer}`);
         } else {
           console.log(`~  ${name}: local=${localVer} remote=${remoteVer}`);
+          differences++;
         }
       }
     }
@@ -727,6 +754,7 @@ async function runStatus(config, backend) {
         );
         if (!localSkill) {
           console.log(`+  ${skill.name} (${type}, remote only)`);
+          differences++;
         } else {
           // Check if content differs
           let changed = false;
@@ -734,6 +762,7 @@ async function runStatus(config, backend) {
           if (type === 'skills_sh' && localSkill.folderHash !== skill.folderHash) changed = true;
           if (type === 'plain' && localSkill.hash !== skill.hash) changed = true;
           console.log(`${changed ? '~ ' : '  '}${skill.name} (${type})${changed ? ' — changed' : ''}`);
+          if (changed) differences++;
         }
       }
     }
@@ -744,6 +773,7 @@ async function runStatus(config, backend) {
       if (!inManifest) {
         console.log(`-  ${localSkill.name} (${type}, local only)`);
         skillCount++;
+        differences++;
       }
     }
     if (skillCount === 0) console.log('  (no skills)');
@@ -761,8 +791,10 @@ async function runStatus(config, backend) {
       for (const name of [...allMcp].sort()) {
         if (!localMcp.includes(name)) {
           console.log(`+  ${name} (remote only)`);
+          differences++;
         } else if (!remoteMcp.includes(name)) {
           console.log(`-  ${name} (local only)`);
+          differences++;
         } else {
           console.log(`   ${name}`);
         }
@@ -784,9 +816,11 @@ async function runStatus(config, backend) {
         const status = diff === 0 ? '  ' : '~ ';
         console.log(`${status}auto memory: ${manifest.memory.auto_memory_directory}`);
         console.log(`   remote: ${manifest.memory.topic_count} topics, local: ${localTopics} topics`);
+        if (status === '~ ') differences++;
       } else {
         console.log(`+  auto memory: ${manifest.memory.auto_memory_directory} (remote only)`);
         console.log(`   ${manifest.memory.topic_count} topics (not enabled locally)`);
+        differences++;
       }
     } else {
       const settings = readSettings(config.CLAUDE_DIR);
@@ -794,13 +828,19 @@ async function runStatus(config, backend) {
       if (localAutoMemDir) {
         const localTopics = countMemoryTopics(localAutoMemDir.replace(/^~/, (config.HOME || os.homedir())));
         console.log(`-  auto memory: ${localAutoMemDir} (local only, ${localTopics} topics)`);
+        differences++;
       } else {
         console.log('  (no memory configured)');
       }
     }
 
-    // Clean up temp file
-    try { fs.unlinkSync(tmpManifest); } catch {}
+    // Final summary — always state the verdict, even when there are no differences
+    console.log();
+    if (differences === 0) {
+      console.log('✓ No differences — local matches remote.');
+    } else {
+      console.log(`✗ ${differences} ${differences === 1 ? 'difference' : 'differences'} found — run 'claude-sync diff' for details.`);
+    }
 
   } catch (e) {
     console.log('Cannot connect to remote:', e.message);
@@ -812,11 +852,13 @@ function typeOfSkill(skill) {
   return skill.type || 'plain';
 }
 
-async function runDiff(config, backend) {
+export async function runDiff(config, backend) {
   console.log('Diff: detailed comparison with remote...');
   console.log();
 
   try {
+    let differences = 0;  // count of content/list differences, for the final summary
+
     const bundleDir = config.BUNDLE_DIR;
     if (!fs.existsSync(bundleDir)) fs.mkdirSync(bundleDir, { recursive: true });
 
@@ -879,12 +921,14 @@ async function runDiff(config, backend) {
 
       if (!exists) {
         console.log(`--- ${file} (only on remote) ---`);
+        differences++;
         continue;
       }
 
       const localHash = hashFile(localPath);
       if (localHash !== remoteHash) {
         console.log(`--- ${displayNameForManifestFile(file)} (diff) ---`);
+        differences++;
 
         // For JSON files, show field-level diff
         if (file.endsWith('.json')) {
@@ -940,11 +984,13 @@ async function runDiff(config, backend) {
           const local = localSkills.find(s => s.name === skill.name && typeOfSkill(s) === type);
           if (!local) {
             console.log(`  + ${type}: ${skill.name} (remote only)`);
+            differences++;
           } else {
             let changed = false;
             if (type === 'git' && local.commit !== skill.commit) changed = true;
             if (type === 'skills_sh' && local.folderHash !== skill.folderHash) changed = true;
             console.log(`  ${changed ? '~' : ' '} ${type}: ${skill.name}${changed ? ' (changed)' : ''}`);
+            if (changed) differences++;
           }
         }
       }
@@ -953,6 +999,7 @@ async function runDiff(config, backend) {
         const inManifest = (manifest.skills?.[type] || []).some(s => s.name === localSkill.name);
         if (!inManifest) {
           console.log(`  - ${type}: ${localSkill.name} (local only)`);
+          differences++;
         }
       }
     }
@@ -966,8 +1013,10 @@ async function runDiff(config, backend) {
         const localVer = localPlugins[name];
         if (!localVer) {
           console.log(`  + ${name}@${ver} (remote only)`);
+          differences++;
         } else if (localVer !== ver) {
           console.log(`  ~ ${name}: local=${localVer} remote=${ver}`);
+          differences++;
         } else {
           console.log(`    ${name}@${ver}`);
         }
@@ -975,7 +1024,64 @@ async function runDiff(config, backend) {
       for (const [name, ver] of Object.entries(localPlugins)) {
         if (!manifest.plugins[name]) {
           console.log(`  - ${name}@${ver} (local only)`);
+          differences++;
         }
+      }
+    }
+
+    // MCP server comparison
+    console.log();
+    console.log('--- MCP Servers ---');
+    const localMcp = extractMcpServers(config.HOME || os.homedir()).names;
+    const remoteMcp = manifest.mcp_servers || [];
+    const allMcp = new Set([...localMcp, ...remoteMcp]);
+
+    if (allMcp.size === 0) {
+      console.log('  (no mcpServers)');
+    } else {
+      for (const name of [...allMcp].sort()) {
+        if (!localMcp.includes(name)) {
+          console.log(`  + ${name} (remote only)`);
+          differences++;
+        } else if (!remoteMcp.includes(name)) {
+          console.log(`  - ${name} (local only)`);
+          differences++;
+        } else {
+          console.log(`    ${name}`);
+        }
+      }
+    }
+
+    // Memory comparison
+    console.log();
+    console.log('--- Memory ---');
+    if (manifest.memory) {
+      const settings = readSettings(config.CLAUDE_DIR);
+      const localAutoMemDir = settings?.autoMemoryDirectory;
+      const localTopics = localAutoMemDir
+        ? countMemoryTopics(localAutoMemDir.replace(/^~/, (config.HOME || os.homedir())))
+        : null;
+
+      if (localTopics !== null) {
+        const topicDiff = manifest.memory.topic_count - localTopics;
+        const changed = topicDiff !== 0;
+        console.log(`  ${changed ? '~' : ' '} auto memory: ${manifest.memory.auto_memory_directory}`);
+        console.log(`    remote: ${manifest.memory.topic_count} topics, local: ${localTopics} topics`);
+        if (changed) differences++;
+      } else {
+        console.log(`  + auto memory: ${manifest.memory.auto_memory_directory} (remote only)`);
+        console.log(`    ${manifest.memory.topic_count} topics (not enabled locally)`);
+        differences++;
+      }
+    } else {
+      const settings = readSettings(config.CLAUDE_DIR);
+      const localAutoMemDir = settings?.autoMemoryDirectory;
+      if (localAutoMemDir) {
+        const localTopics = countMemoryTopics(localAutoMemDir.replace(/^~/, (config.HOME || os.homedir())));
+        console.log(`  - auto memory: ${localAutoMemDir} (local only, ${localTopics} topics)`);
+        differences++;
+      } else {
+        console.log('  (no memory configured)');
       }
     }
 
@@ -985,6 +1091,14 @@ async function runDiff(config, backend) {
       if (config.BACKEND !== 'manual') {
         try { fs.unlinkSync(tmpBundle); } catch {}
       }
+    }
+
+    // Final summary — always state the verdict, even when there are no differences
+    console.log();
+    if (differences === 0) {
+      console.log('✓ No differences — local matches remote.');
+    } else {
+      console.log(`✗ ${differences} ${differences === 1 ? 'difference' : 'differences'} found in detailed comparison.`);
     }
 
   } catch (e) {
