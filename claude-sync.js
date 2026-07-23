@@ -1179,8 +1179,38 @@ function diffJson(local, remote, prefix, secretsMode = 'keep') {
   }
 }
 
-async function runRestore(flags, config) {
+// Cross-platform fast directory removal (spawn array args → no shell escaping issues)
+function removeDir(dirPath) {
+  if (process.platform === 'win32') {
+    spawnSync('cmd', ['/c', 'rmdir', '/s', '/q', dirPath], { stdio: 'ignore' });
+  } else {
+    spawnSync('rm', ['-rf', dirPath], { stdio: 'ignore' });
+  }
+}
+
+async function runRestore(flags, config, argv = []) {
   const home = (config.HOME || os.homedir());
+
+  // Reject unrecognized positional args (e.g. 'claude-sync restore list')
+  const restoreIdx = argv.indexOf('restore');
+  if (restoreIdx === -1) {
+    console.log('Internal error: restore command not found in argv.');
+    return;
+  }
+  const extraArgs = [];
+  for (let i = restoreIdx + 1; i < argv.length; i++) {
+    if (argv[i].startsWith('--')) {
+      // skip flag; also skip its value if next arg is not a flag
+      if (i + 1 < argv.length && !argv[i + 1].startsWith('--')) i++;
+    } else {
+      extraArgs.push(argv[i]);
+    }
+  }
+  if (extraArgs.length > 0) {
+    console.log(`Unknown argument${extraArgs.length > 1 ? 's' : ''}: ${extraArgs.join(', ')}`);
+    console.log('Usage: claude-sync restore [--list] [--backup <timestamp>] [--cleanup [<timestamp>]] [--cleanup-all]');
+    return;
+  }
 
   // Helper: list backup timestamps (sorted newest first)
   const listBackups = () => {
@@ -1210,10 +1240,10 @@ async function runRestore(flags, config) {
     console.log('Removing all backups...');
     try {
       const entries = fs.readdirSync(home).filter(f => f.startsWith('.claude.backup.'));
-      entries.forEach(e => {
-        fs.rmSync(path.join(home, e), { recursive: true, force: true });
-        console.log(`  Removed: ${e}`);
-      });
+      for (const e of entries) {
+        console.log(`  Removing: ${e}`);
+        removeDir(path.join(home, e));
+      }
       console.log(`  ${entries.length} backup(s) removed.`);
     } catch (e) {
       console.log('  Error:', e.message);
@@ -1222,16 +1252,21 @@ async function runRestore(flags, config) {
   }
 
   if (flags.cleanup) {
-    const backups = listBackups();
-    if (backups.length === 0) {
-      console.log('No backups to clean up.');
-      return;
+    let target = flags.cleanup;
+    if (target === true) {
+      const backups = listBackups();
+      if (backups.length === 0) {
+        console.log('No backups to clean up.');
+        return;
+      }
+      target = await pickFromList('Pick a backup to remove:', backups, backups[0]);
     }
-    const target = await pickFromList('Pick a backup to remove:', backups, backups[0]);
     const backupPath = path.join(home, `.claude.backup.${target}`);
     if (fs.existsSync(backupPath)) {
-      fs.rmSync(backupPath, { recursive: true, force: true });
+      removeDir(backupPath);
       console.log(`Removed backup: .claude.backup.${target}`);
+    } else {
+      console.log(`Backup not found: .claude.backup.${target}`);
     }
     return;
   }
@@ -1332,7 +1367,7 @@ export async function main(argv) {
       await runDiff(config, backend);
       break;
     case 'restore':
-      await runRestore(flags, config);
+      await runRestore(flags, config, process.argv);
       break;
   }
 }
