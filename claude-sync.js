@@ -18,7 +18,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { readConfig, remotePath, expandTilde } from './lib/config.js';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, spawn } from 'node:child_process';
 import { prompt, promptYesNo, pickFromList } from './lib/prompt.js';
 import { pushWorkflow, pullWorkflow, readSettings, extractMcpServers, countMemoryTopics } from './lib/workflow.js';
 import { createRcloneBackend } from './backends/rclone.js';
@@ -1179,12 +1179,12 @@ function diffJson(local, remote, prefix, secretsMode = 'keep') {
   }
 }
 
-// Cross-platform fast directory removal (spawn array args → no shell escaping issues)
+// Fast directory removal — spawn async in background, don't block
 function removeDir(dirPath) {
   if (process.platform === 'win32') {
-    spawnSync('cmd', ['/c', 'rmdir', '/s', '/q', dirPath], { stdio: 'ignore' });
+    spawn('cmd', ['/c', 'rmdir', '/s', '/q', dirPath], { detached: true, stdio: 'ignore' }).unref();
   } else {
-    spawnSync('rm', ['-rf', dirPath], { stdio: 'ignore' });
+    spawn('rm', ['-rf', dirPath], { detached: true, stdio: 'ignore' }).unref();
   }
 }
 
