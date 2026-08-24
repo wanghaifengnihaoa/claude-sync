@@ -73,6 +73,13 @@ describe('visibleLen — wide characters', () => {
     expect(visibleLen('\u{D7B0}')).toBe(2); // Hangul Jamo Extended-B
     expect(visibleLen('🀄')).toBe(2);       // mahjong red dragon (U+1F004)
   });
+
+  it('counts regional indicator letters (flags) as narrow', () => {
+    // U+1F1E6-1F1FF regional indicators are EAW=N; two of them form one flag
+    // glyph, so a flag measures 2 columns — not 4.
+    expect(visibleLen('\u{1F1E6}')).toBe(1);           // regional indicator A
+    expect(visibleLen('\u{1F1E8}\u{1F1F3}')).toBe(2);  // CN flag = 2 narrow letters
+  });
 });
 
 describe('blockHeight — wide characters', () => {

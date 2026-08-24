@@ -443,6 +443,45 @@ describe('handlePlugins', () => {
     expect(updated.plugins['existing-plugin@official'][0].version).toBe('1.0.0');
   });
 
+  it('tolerates a top-level null installed_plugins.json', async () => {
+    const pluginsDir = path.join(claudeDir, 'plugins');
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    fs.writeFileSync(path.join(pluginsDir, 'installed_plugins.json'), 'null');
+    await expect(
+      handlePlugins({ 'new-plugin': '1.0.0' }, claudeDir, 'cover', { exec: fakeExec })
+    ).resolves.toBeUndefined();
+    // null content falls back to the flat legacy shape rather than crashing
+    const updated = JSON.parse(fs.readFileSync(path.join(pluginsDir, 'installed_plugins.json'), 'utf-8'));
+    expect(updated['new-plugin']).toBe('1.0.0');
+  });
+
+  it('re-reads the format switch from legacy flat to CC after install', async () => {
+    const pluginsDir = path.join(claudeDir, 'plugins');
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    // Legacy flat file to start with
+    fs.writeFileSync(path.join(pluginsDir, 'installed_plugins.json'), JSON.stringify({ 'existing-plugin': '1.0.0' }));
+    // Real `claude plugin install` rewrites the file in CC format; the re-read
+    // write-back must keep that CC shape instead of forcing flat back on it.
+    const execWrites = (cmd, args) => {
+      execCalls.push({ cmd, args });
+      if (cmd === 'claude' && args[0] === 'plugin' && args[1] === 'install') {
+        const full = args[2];
+        const at = full.lastIndexOf('@');
+        const name = full.slice(0, at);
+        const version = full.slice(at + 1);
+        const pluginsPath = path.join(pluginsDir, 'installed_plugins.json');
+        const raw = JSON.parse(fs.readFileSync(pluginsPath, 'utf-8'));
+        raw.plugins = raw.plugins || {};
+        raw.plugins[`${name}@official`] = [{ version, installedAt: '2026-01-01T00:00:00Z' }];
+        fs.writeFileSync(pluginsPath, JSON.stringify(raw, null, 2));
+      }
+      return Buffer.from('');
+    };
+    await handlePlugins({ 'new-plugin': '1.5.0' }, claudeDir, 'cover', { exec: execWrites });
+    const updated = JSON.parse(fs.readFileSync(path.join(pluginsDir, 'installed_plugins.json'), 'utf-8'));
+    expect(updated.plugins['new-plugin@official'][0].version).toBe('1.5.0');
+  });
+
   it('keep strategy installs missing but never updates existing', async () => {
     writeInstalledPlugins({
       'existing-plugin@official': [{ version: '1.0.0', installedAt: '2026-01-01T00:00:00Z' }]
