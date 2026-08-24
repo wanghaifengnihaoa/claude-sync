@@ -188,7 +188,9 @@ export async function initRcloneRemote(config, {
         `Checking rclone remotes...\n${errorMsg}`,
         ['Retry', 'Back'],
         'Retry',
-        ['✓ rclone found']
+        ['✓ rclone found'],
+        undefined,
+        true // clearOnDone — the loop retries and re-renders fresh
       );
       if (choice === 'Back') return { success: false, reason: 'user_back' };
       continue;
@@ -199,7 +201,9 @@ export async function initRcloneRemote(config, {
         `Found ${remotes.length} remote(s):`,
         remotes,
         remotes[0],
-        ['✓ rclone found']
+        ['✓ rclone found'],
+        undefined,
+        true // clearOnDone
       );
       // REMOTE is just the rclone remote name — folder path is set at push time
       config.REMOTE = `${remoteName}:`;
@@ -215,7 +219,9 @@ export async function initRcloneRemote(config, {
         '✓ rclone found',
         'Please run "rclone config" to set up a cloud drive,',
         'then come back here to continue.'
-      ]
+      ],
+      undefined,
+      true // clearOnDone — the loop re-checks and re-renders fresh
     );
     if (choice === 'Back') return { success: false, reason: 'user_back' };
     // Retry — loop back and re-check
@@ -413,13 +419,11 @@ async function runInit(config) {
   let statusMsg = null;
   const finalConfig = { ...config };
 
-  // DEC save/restore cursor (ESC 7 / ESC 8) anchors the whole init loop to a
-  // fixed position; pickFromList does its own in-place redraw via CSI cursor-up.
-  process.stdout.write('\x1b7');
-
   while (true) {
-    // Return to saved position and clear below, so each iteration overwrites previous render
-    process.stdout.write('\x1b8\x1b[J');
+    // pickFromList erases its own render on resolve (clearOnDone), so each retry
+    // iteration starts clean — no DEC save/restore (ESC 7 / ESC 8), which some
+    // Windows terminals silently ignore and which previously left stale
+    // "Pick a backend" copies stacked on screen.
     backend = await pickFromList(
       'Pick a backend:',
       BACKEND_OPTIONS,
@@ -430,7 +434,8 @@ async function runInit(config) {
         '  manual    — No CLI needed, handle files yourself (iCloud)',
         '  custom    — Your own upload/download commands'
       ],
-      statusMsg  // footer — error messages shown at the bottom
+      statusMsg,  // footer — error messages shown at the bottom
+      true        // clearOnDone — wipe this render before resolving
     );
     statusMsg = null; // clear after display
     finalConfig.BACKEND = backend;
