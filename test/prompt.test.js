@@ -79,6 +79,20 @@ describe('blockHeight — wide characters', () => {
   });
 });
 
+describe('visibleLen — zero-width characters', () => {
+  it('counts combining marks as zero width', () => {
+    expect(visibleLen('é')).toBe(1); // e + combining acute
+  });
+
+  it('counts variation selectors as zero width', () => {
+    expect(visibleLen('❤️')).toBe(1); // heart + VS16
+  });
+
+  it('counts ZWJ within emoji sequences as zero width', () => {
+    expect(visibleLen('\u{1F468}‍\u{1F469}‍\u{1F467}')).toBe(6); // 3 emoji × 2 columns
+  });
+});
+
 // ─────────────────────────────────────────────────────────────
 // clearOnDone — interactive path, exercised with a fake TTY
 // ─────────────────────────────────────────────────────────────

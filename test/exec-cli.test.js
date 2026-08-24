@@ -15,30 +15,30 @@ const ECHO_ARGV = 'console.log(JSON.stringify(process.argv.slice(1)))';
 
 describe('execCli — win32 arg quoting', () => {
   it('keeps an arg containing spaces intact (no word-splitting)', () => {
-    const out = execCli(process.execPath, ['-e', ECHO_ARGV, 'hello world'], { encoding: 'utf8' }, 'win32');
+    const out = execCli(process.execPath, ['-e', ECHO_ARGV, 'hello world'], { encoding: 'utf8' }, { platform: 'win32' });
     expect(JSON.parse(out.trim())).toEqual(['hello world']);
   });
 
   it('keeps a Windows path with spaces intact', () => {
     const dest = path.join(os.tmpdir(), 'claude-sync exec cli dest'); // real space on every platform
-    const out = execCli(process.execPath, ['-e', ECHO_ARGV, dest], { encoding: 'utf8' }, 'win32');
+    const out = execCli(process.execPath, ['-e', ECHO_ARGV, dest], { encoding: 'utf8' }, { platform: 'win32' });
     expect(JSON.parse(out.trim())).toEqual([dest]);
   });
 
   it('does not interpret shell metacharacters in an arg (& / | / >)', () => {
-    const out = execCli(process.execPath, ['-e', 'console.log(process.argv[1])', 'x&echo INJECTED'], { encoding: 'utf8' }, 'win32');
+    const out = execCli(process.execPath, ['-e', 'console.log(process.argv[1])', 'x&echo INJECTED'], { encoding: 'utf8' }, { platform: 'win32' });
     expect(out.trim()).toBe('x&echo INJECTED');
   });
 
   it('does not expand %VAR% in an arg', () => {
-    const out = execCli(process.execPath, ['-e', 'console.log(process.argv[1])', 'a%PATH%b'], { encoding: 'utf8' }, 'win32');
+    const out = execCli(process.execPath, ['-e', 'console.log(process.argv[1])', 'a%PATH%b'], { encoding: 'utf8' }, { platform: 'win32' });
     expect(out.trim()).toBe('a%PATH%b');
   });
 
   it('throws with the exit status on a non-zero exit', () => {
     let caught = null;
     try {
-      execCli(process.execPath, ['-e', 'process.exit(3)'], { encoding: 'utf8' }, 'win32');
+      execCli(process.execPath, ['-e', 'process.exit(3)'], { encoding: 'utf8' }, { platform: 'win32' });
     } catch (e) {
       caught = e;
     }
