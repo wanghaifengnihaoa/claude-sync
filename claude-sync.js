@@ -263,7 +263,9 @@ export function detectCloudDirs({ home, existsSync, readdirSync, platform = proc
     try {
       return readdirSync(dir).some(e => e !== 'desktop.ini' && e !== '.DS_Store');
     } catch {
-      return false;
+      // A transient read error shouldn't hide a real cloud folder — offer it
+      // rather than silently dropping a legitimate bundle-dir choice.
+      return true;
     }
   };
   const add = (label, dir) => {

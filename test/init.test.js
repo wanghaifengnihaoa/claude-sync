@@ -258,6 +258,16 @@ describe('detectCloudDirs', () => {
     expect(found).toEqual([]);
   });
 
+  it('Windows: offers a cloud dir when the readdir scan errors', () => {
+    // A transient read error must not silently drop a real cloud folder —
+    // existence is enough to offer it in the bundle-dir picker.
+    const oneDrive = path.join(home, 'OneDrive');
+    const existsSync = (p) => p === oneDrive;
+    const readdirSync = () => { throw new Error('permission denied'); };
+    const found = detectCloudDirs({ home, existsSync, readdirSync, platform: 'win32' });
+    expect(found).toEqual([{ label: 'OneDrive', dir: oneDrive }]);
+  });
+
   it('Windows: detects iCloud Drive with a space (official name)', () => {
     const iCloudWin = path.join(home, 'iCloud Drive');
     const existsSync = (p) => p === iCloudWin;

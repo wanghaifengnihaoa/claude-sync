@@ -2,7 +2,25 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { createManifest, buildBundle, readManifest, extractBundle } from '../lib/sync.js';
+import { createManifest, buildBundle, readManifest, extractBundle, pluginNameFromKey } from '../lib/sync.js';
+
+describe('pluginNameFromKey', () => {
+  it('strips the @marketplace suffix from a regular key', () => {
+    expect(pluginNameFromKey('existing-plugin@official')).toBe('existing-plugin');
+  });
+
+  it('keeps scoped plugin names intact', () => {
+    expect(pluginNameFromKey('@scope/name@official')).toBe('@scope/name');
+  });
+
+  it('passes bare names through unchanged', () => {
+    expect(pluginNameFromKey('bare-name')).toBe('bare-name');
+  });
+
+  it('keeps a bare scoped name (no marketplace) unchanged', () => {
+    expect(pluginNameFromKey('@scope/name')).toBe('@scope/name');
+  });
+});
 
 describe('createManifest', () => {
   it('creates a manifest with required fields', () => {

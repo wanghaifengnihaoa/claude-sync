@@ -41,6 +41,83 @@ describe('blockHeight', () => {
   });
 });
 
+// Wide/fullwidth characters (CJK, Hangul, fullwidth punctuation, emoji) occupy
+// TWO terminal columns but only one UTF-16 code unit. Measuring them with
+// s.length undercounts the wrapped height, which desyncs the cursor-up/erase
+// math and re-introduces the stacked-render bug — just triggered by wide text.
+
+describe('visibleLen — wide characters', () => {
+  it('counts CJK as two columns each', () => {
+    expect(visibleLen('中文测试')).toBe(8); // 4 × 2
+  });
+
+  it('counts a mixed ASCII + CJK line by display width', () => {
+    expect(visibleLen('a中b')).toBe(4); // 1 + 2 + 1
+  });
+
+  it('strips ANSI before applying wide-char width', () => {
+    expect(visibleLen('\x1b[7m中文\x1b[0m')).toBe(4);
+  });
+
+  it('counts fullwidth punctuation as wide', () => {
+    expect(visibleLen('（测试）')).toBe(8); // fullwidth parens + CJK = 4 × 2
+  });
+
+  it('counts Hangul syllables as wide', () => {
+    expect(visibleLen('한국어')).toBe(6); // 3 × 2
+  });
+
+  it('counts Yijing hexagrams, Hangul Jamo Extended and mahjong tiles as wide', () => {
+    expect(visibleLen('\u{4DC0}')).toBe(2); // Yijing hexagram #1
+    expect(visibleLen('\u{A960}')).toBe(2); // Hangul Jamo Extended-A
+    expect(visibleLen('\u{D7B0}')).toBe(2); // Hangul Jamo Extended-B
+    expect(visibleLen('🀄')).toBe(2);       // mahjong red dragon (U+1F004)
+  });
+
+  it('counts regional indicator letters (flags) as narrow', () => {
+    // U+1F1E6-1F1FF regional indicators are EAW=N; two of them form one flag
+    // glyph, so a flag measures 2 columns — not 4.
+    expect(visibleLen('\u{1F1E6}')).toBe(1);           // regional indicator A
+    expect(visibleLen('\u{1F1E8}\u{1F1F3}')).toBe(2);  // CN flag = 2 narrow letters
+  });
+});
+
+describe('blockHeight — wide characters', () => {
+  it('wraps a 45-char CJK line (90 columns) to 2 lines at width 80', () => {
+    expect(blockHeight(['中'.repeat(45)], 80)).toBe(2);
+  });
+
+  it('wraps a styled CJK line at a narrow width', () => {
+    // visible 90 columns at width 20 → 5 terminal lines
+    expect(blockHeight([`\x1b[7m${'中'.repeat(45)}\x1b[0m`], 20)).toBe(5);
+  });
+});
+
+describe('visibleLen — zero-width characters', () => {
+  it('counts combining marks as zero width', () => {
+    expect(visibleLen('é')).toBe(1); // e + combining acute
+  });
+
+  it('counts variation selectors as zero width', () => {
+    expect(visibleLen('❤️')).toBe(1); // heart + VS16
+  });
+
+  it('counts ZWJ within emoji sequences as zero width', () => {
+    expect(visibleLen('\u{1F468}‍\u{1F469}‍\u{1F467}')).toBe(6); // 3 emoji × 2 columns
+  });
+
+  it('counts zero-width space, word joiner and BOM as zero width', () => {
+    expect(visibleLen('a​b')).toBe(2);   // a + ZWSP + b
+    expect(visibleLen('a⁠b')).toBe(2);   // a + word joiner + b
+    expect(visibleLen('﻿a')).toBe(1);    // BOM + a
+  });
+
+  it('counts LRM/RLM direction marks as zero width', () => {
+    expect(visibleLen('a‎b')).toBe(2);  // a + LRM + b
+    expect(visibleLen('a‏b')).toBe(2);  // a + RLM + b
+  });
+});
+
 // ─────────────────────────────────────────────────────────────
 // clearOnDone — interactive path, exercised with a fake TTY
 // ─────────────────────────────────────────────────────────────
