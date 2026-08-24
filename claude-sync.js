@@ -167,7 +167,7 @@ export async function initRcloneRemote(config, {
         '✗ rclone not found. Install it first, or pick another backend:',
         '  macOS:  brew install rclone',
         '  Linux:  curl https://rclone.org/install.sh | sudo bash',
-        '  Windows: scoop install rclone',
+        '  Windows: winget install Rclone.Rclone',
         '  Docs: https://rclone.org/install/'
       ]
     };
@@ -188,7 +188,8 @@ export async function initRcloneRemote(config, {
         `Checking rclone remotes...\n${errorMsg}`,
         ['Retry', 'Back'],
         'Retry',
-        ['✓ rclone found']
+        ['✓ rclone found'],
+        true // clearOnDone — retry loop must clear the previous render
       );
       if (choice === 'Back') return { success: false, reason: 'user_back' };
       continue;
@@ -199,7 +200,8 @@ export async function initRcloneRemote(config, {
         `Found ${remotes.length} remote(s):`,
         remotes,
         remotes[0],
-        ['✓ rclone found']
+        ['✓ rclone found'],
+        true // clearOnDone — keep cursor at the render start for the following steps
       );
       // REMOTE is just the rclone remote name — folder path is set at push time
       config.REMOTE = `${remoteName}:`;
@@ -215,7 +217,8 @@ export async function initRcloneRemote(config, {
         '✓ rclone found',
         'Please run "rclone config" to set up a cloud drive,',
         'then come back here to continue.'
-      ]
+      ],
+      true // clearOnDone — retry loop must clear the previous render
     );
     if (choice === 'Back') return { success: false, reason: 'user_back' };
     // Retry — loop back and re-check
@@ -411,7 +414,8 @@ async function runInit(config) {
         '  manual    — No CLI needed, handle files yourself (iCloud)',
         '  custom    — Your own upload/download commands'
       ],
-      statusMsg  // footer — error messages shown at the bottom
+      statusMsg,  // footer — error messages shown at the bottom
+      true        // clearOnDone — this loop re-renders on retry; don't stack copies
     );
     statusMsg = null; // clear after display
     finalConfig.BACKEND = backend;

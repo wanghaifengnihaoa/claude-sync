@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -29,6 +29,56 @@ describe('pickFromList (non-interactive)', () => {
   it('uses item matching for default selection', async () => {
     const result = await pickFromList('Pick:', ['apple', 'banana', 'cherry'], 'cherry');
     expect(result).toBe('cherry');
+  });
+});
+
+describe('pickFromList (interactive, clearOnDone)', () => {
+  function withMockIO() {
+    const writes = [];
+    let onDataHandler = null;
+    const stdinMock = {
+      isTTY: true,
+      setRawMode: () => {},
+      resume: () => {},
+      pause: () => {},
+      on: (evt, fn) => { if (evt === 'data') onDataHandler = fn; },
+      removeListener: (evt, fn) => { if (evt === 'data' && onDataHandler === fn) onDataHandler = null; }
+    };
+    const stdoutMock = { isTTY: true, write: (s) => writes.push(String(s)) };
+    const prevIn = Object.getOwnPropertyDescriptor(process, 'stdin');
+    const prevOut = Object.getOwnPropertyDescriptor(process, 'stdout');
+    Object.defineProperty(process, 'stdin', { configurable: true, value: stdinMock });
+    Object.defineProperty(process, 'stdout', { configurable: true, value: stdoutMock });
+
+    return {
+      writes,
+      pressEnter: () => { if (onDataHandler) onDataHandler(Buffer.from('\r')); },
+      restore() {
+        if (prevIn) Object.defineProperty(process, 'stdin', prevIn);
+        if (prevOut) Object.defineProperty(process, 'stdout', prevOut);
+      }
+    };
+  }
+
+  let io;
+  beforeEach(() => { io = withMockIO(); });
+  afterEach(() => { io.restore(); });
+
+  it('default: leaves the picked list on screen (ends with newline)', async () => {
+    const p = pickFromList('Pick:', ['a', 'b'], 'a', null, null, false);
+    io.pressEnter();
+    await p;
+    expect(io.writes[io.writes.length - 1]).toBe('\x1b[?25h'); // cleanup: show cursor
+    expect(io.writes[io.writes.length - 2]).toBe('\n');        // confirm: newline only
+  });
+
+  it('clearOnDone: erases this render before resolving (restore cursor + clear below)', async () => {
+    const p = pickFromList('Pick:', ['a', 'b'], 'a', null, null, true);
+    io.pressEnter();
+    await p;
+    expect(io.writes[io.writes.length - 1]).toBe('\x1b[?25h'); // cleanup: show cursor
+    expect(io.writes[io.writes.length - 2]).toBe('\x1b[J');    // clear below
+    expect(io.writes[io.writes.length - 3]).toBe('\x1b[u');    // restore cursor to render start
   });
 });
 
