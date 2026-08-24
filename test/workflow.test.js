@@ -514,6 +514,42 @@ describe('handlePlugins', () => {
     expect(updated.plugins['bad-plugin@official']).toBeUndefined();
   });
 
+  it('does not record a failed update that rolled back as the new version', async () => {
+    writeInstalledPlugins({
+      'existing-plugin@official': [{ version: '1.0.0', installedAt: '2026-01-01T00:00:00Z' }]
+    });
+    // exec that throws for the target update version but lets the rollback pass
+    const failingUpdate = (cmd, args) => {
+      execCalls.push({ cmd, args });
+      if (cmd === 'claude' && args[0] === 'plugin' && args[1] === 'install' && args[2] === 'existing-plugin@2.0.0') {
+        throw new Error('version not found on marketplace');
+      }
+      return Buffer.from('');
+    };
+    const tmpBundle = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-sync-bundle-'));
+    try {
+      await handlePlugins(
+        { 'existing-plugin': '2.0.0' },
+        claudeDir,
+        'cover',
+        { exec: failingUpdate, scriptDir: tmpBundle }
+      );
+      // rollback attempted, and the fallback script still carries the target version
+      const cmds = execCalls.map(c => `${c.cmd} ${c.args.join(' ')}`);
+      expect(cmds).toContain('claude plugin uninstall existing-plugin');
+      expect(cmds).toContain('claude plugin install existing-plugin@2.0.0');
+      expect(cmds).toContain('claude plugin install existing-plugin@1.0.0');
+      const script = fs.readFileSync(path.join(tmpBundle, 'install-plugins.sh'), 'utf-8');
+      expect(script).toContain('claude plugin install existing-plugin@2.0.0');
+    } finally {
+      fs.rmSync(tmpBundle, { recursive: true, force: true });
+    }
+    // the file must still record the rolled-back version, so the next sync
+    // retries the update instead of thinking 2.0.0 is already in place.
+    const updated = JSON.parse(fs.readFileSync(path.join(claudeDir, 'plugins', 'installed_plugins.json'), 'utf-8'));
+    expect(updated.plugins['existing-plugin@official'][0].version).toBe('1.0.0');
+  });
+
   it('keep strategy installs missing but never updates existing', async () => {
     writeInstalledPlugins({
       'existing-plugin@official': [{ version: '1.0.0', installedAt: '2026-01-01T00:00:00Z' }]
