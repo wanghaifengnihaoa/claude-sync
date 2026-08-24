@@ -111,6 +111,11 @@ describe('visibleLen — zero-width characters', () => {
     expect(visibleLen('a⁠b')).toBe(2);   // a + word joiner + b
     expect(visibleLen('﻿a')).toBe(1);    // BOM + a
   });
+
+  it('counts LRM/RLM direction marks as zero width', () => {
+    expect(visibleLen('a‎b')).toBe(2);  // a + LRM + b
+    expect(visibleLen('a‏b')).toBe(2);  // a + RLM + b
+  });
 });
 
 // ─────────────────────────────────────────────────────────────

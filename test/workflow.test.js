@@ -482,6 +482,38 @@ describe('handlePlugins', () => {
     expect(updated.plugins['new-plugin@official'][0].version).toBe('1.5.0');
   });
 
+  it('does not record failed installs in installed_plugins.json', async () => {
+    const pluginsDir = path.join(claudeDir, 'plugins');
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    fs.writeFileSync(path.join(pluginsDir, 'installed_plugins.json'), JSON.stringify({ version: 2, plugins: {} }));
+    // exec that throws for the exact install command, succeeds otherwise
+    const failingInstall = (cmd, args) => {
+      execCalls.push({ cmd, args });
+      if (cmd === 'claude' && args[0] === 'plugin' && args[1] === 'install' && args[2] === 'bad-plugin@1.0.0') {
+        throw new Error('marketplace unreachable');
+      }
+      return Buffer.from('');
+    };
+    const tmpBundle = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-sync-bundle-'));
+    try {
+      await handlePlugins(
+        { 'bad-plugin': '1.0.0' },
+        claudeDir,
+        'cover',
+        { exec: failingInstall, scriptDir: tmpBundle }
+      );
+      // fallback script still generated for the failed op
+      expect(fs.existsSync(path.join(tmpBundle, 'install-plugins.sh'))).toBe(true);
+    } finally {
+      fs.rmSync(tmpBundle, { recursive: true, force: true });
+    }
+    // the file must NOT claim bad-plugin@1.0.0 is installed, or the next sync
+    // would skip it and the plugin would never get installed.
+    const updated = JSON.parse(fs.readFileSync(path.join(pluginsDir, 'installed_plugins.json'), 'utf-8'));
+    expect(updated.plugins['bad-plugin']).toBeUndefined();
+    expect(updated.plugins['bad-plugin@official']).toBeUndefined();
+  });
+
   it('keep strategy installs missing but never updates existing', async () => {
     writeInstalledPlugins({
       'existing-plugin@official': [{ version: '1.0.0', installedAt: '2026-01-01T00:00:00Z' }]
