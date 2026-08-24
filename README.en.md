@@ -135,6 +135,20 @@ All options have sensible defaults — only `REMOTE` is required (except for man
 | `mcpServers` (from `.claude.json`) | |
 | `shared-memory/` (if enabled) | |
 
+## Conflict detection
+
+Before `push`, claude-sync checks whether another machine has pushed newer changes to avoid overwriting them:
+
+1. Downloads the remote `manifest.json` (tiny file), reads `pushed_by` (who pushed) and `pushed_at` (when)
+2. Compares with the local `state.json` `last_pull_at` (when this machine last pulled)
+3. **Conflict when both conditions are true**:
+   - The remote was pushed by a **different** machine (`pushed_by` ≠ local machine)
+   - The remote was pushed **after** this machine's last pull (`pushed_at` > `last_pull_at`)
+
+> Example: office Mac pushes at 9:00 → home Mac pulls (records `last_pull_at=9:30`) → office Mac pushes again at 10:00 → home Mac tries to push → **conflict!** (remote has updates home hasn't seen), prompts you to `pull` first.
+
+Pushing repeatedly from the same machine never conflicts. The `manual` backend skips conflict detection (no remote access).
+
 ## Secrets handling
 
 ### `keep` mode (default)
