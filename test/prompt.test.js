@@ -1,0 +1,148 @@
+import { describe, it, expect } from 'vitest';
+import { visibleLen, blockHeight, pickFromList } from '../lib/prompt.js';
+
+// Regression for the duplicated-list-render bug: pickFromList used to redraw
+// via cursor save/restore (ESC[s/ESC[u), which some Windows terminals silently
+// ignore — each arrow key *appended* a fresh copy of the list. The fix redraws
+// with CSI cursor-up + erase-below, whose line count comes from blockHeight().
+// These tests pin the height math so a long/wrapped item can't desync it.
+
+describe('visibleLen', () => {
+  it('strips ANSI styling for visible width', () => {
+    expect(visibleLen('\x1b[7mhello\x1b[0m')).toBe(5);
+  });
+
+  it('counts plain text as-is', () => {
+    expect(visibleLen('What would you like to do?')).toBe(26);
+  });
+
+  it('empty line has zero width', () => {
+    expect(visibleLen('')).toBe(0);
+  });
+});
+
+describe('blockHeight', () => {
+  it('counts one terminal line per rendered line', () => {
+    expect(blockHeight(['What would you like to do?', '', '    1) a', '    2) b', ''], 80)).toBe(5);
+  });
+
+  it('blank lines still occupy one terminal line', () => {
+    expect(blockHeight([''], 80)).toBe(1);
+  });
+
+  it('counts wrapped lines for over-wide content', () => {
+    // 45 chars at width 20 → 3 terminal lines
+    expect(blockHeight(['x'.repeat(45)], 20)).toBe(3);
+  });
+
+  it('strips ANSI codes before measuring width', () => {
+    // styled long line: visible 45 chars at width 10 → 5 lines
+    expect(blockHeight([`\x1b[7m${'x'.repeat(45)}\x1b[0m`], 10)).toBe(5);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// clearOnDone — interactive path, exercised with a fake TTY
+// ─────────────────────────────────────────────────────────────
+// pickFromList only takes the interactive branch when stdin & stdout report
+// isTTY. We swap in fakes, drive arrow/enter keypresses, and inspect the bytes
+// written so the erase-on-finish behavior is pinned down. Regression guard for
+// the retry-loop stacking bug: a loop calling pickFromList again (e.g. "Back"
+// on rclone setup) must start from a clean line, not append a second copy.
+
+// process.stdin/stdout expose only getters, so swap via defineProperty.
+function setProcessIO(name, value) {
+  Object.defineProperty(process, name, { value, configurable: true, writable: true });
+}
+
+function withFakeTTY() {
+  const orig = { stdin: process.stdin, stdout: process.stdout };
+  let dataHandler = null;
+  const writes = [];
+  setProcessIO('stdin', {
+    isTTY: true,
+    setRawMode() {},
+    on(ev, fn) { if (ev === 'data') dataHandler = fn; },
+    resume() {},
+    pause() {},
+    removeListener() {}
+  });
+  setProcessIO('stdout', {
+    isTTY: true,
+    columns: 80,
+    write(s) { writes.push(s); }
+  });
+  return {
+    writes,
+    type(key) { dataHandler(Buffer.from(key)); },
+    restore() { setProcessIO('stdin', orig.stdin); setProcessIO('stdout', orig.stdout); }
+  };
+}
+
+describe('pickFromList clearOnDone', () => {
+  it('erases its own render before resolving when clearOnDone is set', async () => {
+    const tty = withFakeTTY();
+    try {
+      const p = pickFromList('Choose:', ['a', 'b'], 'a', undefined, undefined, true);
+      tty.type('\r');
+      const result = await p;
+      expect(result).toBe('a');
+      const out = tty.writes.join('');
+      // finished with cursor-up to block top + erase-below, then show cursor
+      expect(out).toMatch(/\r\x1b\[\d+A\x1b\[J\x1b\[\?25h$/);
+      // never falls back to DEC save/restore or SCOSC/SCOC
+      expect(out).not.toMatch(/\x1b7|\x1b8|\x1b\[s|\x1b\[u/);
+    } finally {
+      tty.restore();
+    }
+  });
+
+  it('keeps the render on screen when clearOnDone is omitted', async () => {
+    const tty = withFakeTTY();
+    try {
+      const p = pickFromList('Choose:', ['a', 'b'], 'a');
+      tty.type('\r');
+      const result = await p;
+      expect(result).toBe('a');
+      const out = tty.writes.join('');
+      // default: newline + show cursor, no erase-back
+      expect(out).toMatch(/\n\x1b\[\?25h$/);
+      expect(out).not.toMatch(/\r\x1b\[/);
+    } finally {
+      tty.restore();
+    }
+  });
+
+  it('erases on q/Escape abort too', async () => {
+    const tty = withFakeTTY();
+    try {
+      const p = pickFromList('Choose:', ['a', 'b'], 'b', undefined, undefined, true);
+      tty.type('q');
+      const result = await p;
+      expect(result).toBe('b');
+      const out = tty.writes.join('');
+      expect(out).toMatch(/\r\x1b\[\d+A\x1b\[J\x1b\[\?25h$/);
+    } finally {
+      tty.restore();
+    }
+  });
+
+  it('each loop iteration clears the previous render (no stacking)', async () => {
+    const tty = withFakeTTY();
+    try {
+      const p1 = pickFromList('Choose:', ['a', 'b'], 'a', undefined, undefined, true);
+      tty.type('\r');
+      expect(await p1).toBe('a');
+      const p2 = pickFromList('Choose:', ['a', 'b'], 'a', undefined, undefined, true);
+      tty.type('\r');
+      expect(await p2).toBe('a');
+      const out = tty.writes.join('');
+      // every confirm must emit an erase-back, so renders never stack
+      const erases = out.match(/\r\x1b\[\d+A\x1b\[J/g);
+      expect(erases).not.toBeNull();
+      expect(erases.length).toBe(2);
+    } finally {
+      tty.restore();
+    }
+  });
+});

@@ -1,0 +1,3 @@
+# Vite/vitest mishandles CRLF shebang lines: the shebang gets re-inserted mid-file,
+# breaking tests that import this CLI entry. Force LF for it on every platform.
+claude-sync.js text eol=lf

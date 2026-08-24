@@ -188,7 +188,9 @@ export async function initRcloneRemote(config, {
         `Checking rclone remotes...\n${errorMsg}`,
         ['Retry', 'Back'],
         'Retry',
-        ['✓ rclone found']
+        ['✓ rclone found'],
+        undefined,
+        true // clearOnDone — the loop retries and re-renders fresh
       );
       if (choice === 'Back') return { success: false, reason: 'user_back' };
       continue;
@@ -199,7 +201,9 @@ export async function initRcloneRemote(config, {
         `Found ${remotes.length} remote(s):`,
         remotes,
         remotes[0],
-        ['✓ rclone found']
+        ['✓ rclone found'],
+        undefined,
+        true // clearOnDone
       );
       // REMOTE is just the rclone remote name — folder path is set at push time
       config.REMOTE = `${remoteName}:`;
@@ -215,7 +219,9 @@ export async function initRcloneRemote(config, {
         '✓ rclone found',
         'Please run "rclone config" to set up a cloud drive,',
         'then come back here to continue.'
-      ]
+      ],
+      undefined,
+      true // clearOnDone — the loop re-checks and re-renders fresh
     );
     if (choice === 'Back') return { success: false, reason: 'user_back' };
     // Retry — loop back and re-check
@@ -244,7 +250,25 @@ export async function initRcloneRemote(config, {
  */
 export function detectCloudDirs({ home, existsSync, readdirSync, platform = process.platform } = {}) {
   const found = [];
-  const add = (label, dir) => { if (dir && existsSync(dir)) found.push({ label, dir }); };
+  // Only offer a cloud folder that is actually in use. Windows pre-creates
+  // ~/OneDrive (and some machines keep ~/iCloud Drive / ~/Dropbox leftovers)
+  // containing nothing but desktop.ini even when the sync client is unused —
+  // offering those just clutters the bundle-dir picker with dead choices.
+  // When readdirSync isn't available (tests / minimal callers), assume real.
+  const isRealCloudDir = (dir) => {
+    // macOS/Linux only create cloud folders when a sync client is actually
+    // installed, so existence is enough there — gate the leftover-filter to
+    // Windows so non-Windows behavior stays byte-for-byte unchanged.
+    if (platform !== 'win32' || !readdirSync) return true;
+    try {
+      return readdirSync(dir).some(e => e !== 'desktop.ini' && e !== '.DS_Store');
+    } catch {
+      return false;
+    }
+  };
+  const add = (label, dir) => {
+    if (dir && existsSync(dir) && isRealCloudDir(dir)) found.push({ label, dir });
+  };
 
   if (platform === 'darwin') {
     add('iCloud Drive', path.join(home, 'Library', 'Mobile Documents', 'com~apple~CloudDocs'));
@@ -395,12 +419,11 @@ async function runInit(config) {
   let statusMsg = null;
   const finalConfig = { ...config };
 
-  // DEC save/restore cursor (ESC 7 / ESC 8) — independent of ANSI ESC[s used by pickFromList
-  process.stdout.write('\x1b7');
-
   while (true) {
-    // Return to saved position and clear below, so each iteration overwrites previous render
-    process.stdout.write('\x1b8\x1b[J');
+    // pickFromList erases its own render on resolve (clearOnDone), so each retry
+    // iteration starts clean — no DEC save/restore (ESC 7 / ESC 8), which some
+    // Windows terminals silently ignore and which previously left stale
+    // "Pick a backend" copies stacked on screen.
     backend = await pickFromList(
       'Pick a backend:',
       BACKEND_OPTIONS,
@@ -411,7 +434,8 @@ async function runInit(config) {
         '  manual    — No CLI needed, handle files yourself (iCloud)',
         '  custom    — Your own upload/download commands'
       ],
-      statusMsg  // footer — error messages shown at the bottom
+      statusMsg,  // footer — error messages shown at the bottom
+      true        // clearOnDone — wipe this render before resolving
     );
     statusMsg = null; // clear after display
     finalConfig.BACKEND = backend;
@@ -1311,8 +1335,14 @@ async function runRestore(flags, config, argv = []) {
     } catch {
       // rename failed, try direct removal
       try { fs.rmSync(claudeDir, { recursive: true, force: true }); } catch {
-        // last resort: shell fallback for stubborn files
-        spawnSync('rm', ['-rf', claudeDir]);
+        // last resort: shell fallback for stubborn files. rm isn't a native
+        // Windows command (spawnSync would ENOENT), so use rmdir there,
+        // mirroring removeDir().
+        if (process.platform === 'win32') {
+          spawnSync('cmd', ['/c', 'rmdir', '/s', '/q', claudeDir]);
+        } else {
+          spawnSync('rm', ['-rf', claudeDir]);
+        }
       }
     }
     // Clean up the renamed old dir in background
