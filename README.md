@@ -115,6 +115,20 @@ Where should the bundle live?
 | `mcpServers`（从 `.claude.json` 提取） | |
 | `shared-memory/`（若开启全局化） | |
 
+## 冲突检测
+
+`push` 前会自动检查远端是否被其他机器更新过，防止误覆盖：
+
+1. 下载远端 `manifest.json`（小文件），读取 `pushed_by`（谁推的）和 `pushed_at`（何时推的）
+2. 对比本机 `state.json` 中的 `last_pull_at`（本机上次拉取时间）
+3. **同时满足以下条件则判定冲突**：
+   - 远端是**其他机器**推的（`pushed_by` ≠ 本机）
+   - 远端在本机**上次拉取之后**有更新（`pushed_at` > `last_pull_at`）
+
+> 举例：公司 Mac 9:00 push → 家里 Mac pull（记录 `last_pull_at=9:30`）→ 公司 Mac 10:00 又 push → 家里 Mac 直接 push → **冲突**（远端有家里没见过的更新），提示先 `pull` 再重新 `push`。
+
+同一台机器连续 push 不会冲突；manual 后端跳过冲突检测（无法访问远端）。
+
 ## 密钥处理
 
 ### `keep` 模式（默认）
