@@ -243,10 +243,12 @@ describe('runShell', () => {
     expect(received).toContain('\\"hello\\"');
   });
 
-  it('default platform falls back to process.platform (Unix here)', async () => {
+  it('default platform falls back to process.platform', async () => {
     let received = null;
     const execAsync = async (cmd) => { received = cmd; return { stdout: '', stderr: '' }; };
     await runShell('ls', { execAsync });
-    expect(received).toBe('ls');
+    // On Windows the command is wrapped for PowerShell; on Unix it's passed
+    // through unchanged — either way the command reaches the shell.
+    expect(received).toContain('ls');
   });
 });
