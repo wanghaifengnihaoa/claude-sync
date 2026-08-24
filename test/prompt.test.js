@@ -41,6 +41,44 @@ describe('blockHeight', () => {
   });
 });
 
+// Wide/fullwidth characters (CJK, Hangul, fullwidth punctuation, emoji) occupy
+// TWO terminal columns but only one UTF-16 code unit. Measuring them with
+// s.length undercounts the wrapped height, which desyncs the cursor-up/erase
+// math and re-introduces the stacked-render bug — just triggered by wide text.
+
+describe('visibleLen — wide characters', () => {
+  it('counts CJK as two columns each', () => {
+    expect(visibleLen('中文测试')).toBe(8); // 4 × 2
+  });
+
+  it('counts a mixed ASCII + CJK line by display width', () => {
+    expect(visibleLen('a中b')).toBe(4); // 1 + 2 + 1
+  });
+
+  it('strips ANSI before applying wide-char width', () => {
+    expect(visibleLen('\x1b[7m中文\x1b[0m')).toBe(4);
+  });
+
+  it('counts fullwidth punctuation as wide', () => {
+    expect(visibleLen('（测试）')).toBe(8); // fullwidth parens + CJK = 4 × 2
+  });
+
+  it('counts Hangul syllables as wide', () => {
+    expect(visibleLen('한국어')).toBe(6); // 3 × 2
+  });
+});
+
+describe('blockHeight — wide characters', () => {
+  it('wraps a 45-char CJK line (90 columns) to 2 lines at width 80', () => {
+    expect(blockHeight(['中'.repeat(45)], 80)).toBe(2);
+  });
+
+  it('wraps a styled CJK line at a narrow width', () => {
+    // visible 90 columns at width 20 → 5 terminal lines
+    expect(blockHeight([`\x1b[7m${'中'.repeat(45)}\x1b[0m`], 20)).toBe(5);
+  });
+});
+
 // ─────────────────────────────────────────────────────────────
 // clearOnDone — interactive path, exercised with a fake TTY
 // ─────────────────────────────────────────────────────────────
