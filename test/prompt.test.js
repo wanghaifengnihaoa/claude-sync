@@ -66,6 +66,13 @@ describe('visibleLen — wide characters', () => {
   it('counts Hangul syllables as wide', () => {
     expect(visibleLen('한국어')).toBe(6); // 3 × 2
   });
+
+  it('counts Yijing hexagrams, Hangul Jamo Extended and mahjong tiles as wide', () => {
+    expect(visibleLen('\u{4DC0}')).toBe(2); // Yijing hexagram #1
+    expect(visibleLen('\u{A960}')).toBe(2); // Hangul Jamo Extended-A
+    expect(visibleLen('\u{D7B0}')).toBe(2); // Hangul Jamo Extended-B
+    expect(visibleLen('🀄')).toBe(2);       // mahjong red dragon (U+1F004)
+  });
 });
 
 describe('blockHeight — wide characters', () => {

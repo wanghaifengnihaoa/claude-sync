@@ -47,6 +47,19 @@ describe('execCli — win32 arg quoting', () => {
     expect(caught.status).toBe(3);
   });
 
+  it('spawn errors expose a null status, matching execFileSync', () => {
+    // execFileSync's spawn-error (e.g. ENOENT) contract sets err.status null;
+    // the win32 branch must not surface undefined where the POSIX branch gives null.
+    let caught = null;
+    try {
+      execCli('definitely-not-a-real-command-xyz-12345', [], {}, { platform: 'win32' });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect(caught.status).toBeNull();
+  });
+
   it('default platform path (non-win32) still works via execFileSync', () => {
     // On any platform this exercises the direct-exec branch (mac/Linux contract).
     const out = execCli(process.execPath, ['-e', 'console.log("ok")'], { encoding: 'utf8' });

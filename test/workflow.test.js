@@ -406,6 +406,43 @@ describe('handlePlugins', () => {
     expect(updated.plugins['new-plugin'][0].version).toBe('1.5.0');
   });
 
+  it('preserves claude CLI writes to installed_plugins.json after install', async () => {
+    writeInstalledPlugins({
+      'existing-plugin@official': [{ version: '1.0.0', installedAt: '2026-01-01T00:00:00Z' }]
+    });
+    // Real `claude plugin install` rewrites installed_plugins.json itself with
+    // name@marketplace keys. A write-back built on the pre-install snapshot
+    // would clobber that fresh entry with a bare-name key; the fix re-reads the
+    // file after the loop so the CLI's own key shape survives.
+    const execWrites = (cmd, args) => {
+      execCalls.push({ cmd, args });
+      if (cmd === 'claude' && args[0] === 'plugin' && args[1] === 'install') {
+        const full = args[2];
+        const at = full.lastIndexOf('@');
+        const name = full.slice(0, at);
+        const version = full.slice(at + 1);
+        const pluginsPath = path.join(claudeDir, 'plugins', 'installed_plugins.json');
+        const raw = JSON.parse(fs.readFileSync(pluginsPath, 'utf-8'));
+        raw.plugins[`${name}@official`] = [{ version, installedAt: '2026-01-01T00:00:00Z' }];
+        fs.writeFileSync(pluginsPath, JSON.stringify(raw, null, 2));
+      }
+      return Buffer.from('');
+    };
+    await handlePlugins(
+      { 'new-plugin': '1.5.0' },
+      claudeDir,
+      'cover',
+      { exec: execWrites }
+    );
+
+    const updated = JSON.parse(fs.readFileSync(path.join(claudeDir, 'plugins', 'installed_plugins.json'), 'utf-8'));
+    // claude wrote new-plugin@official; write-back must keep that key, not
+    // overwrite it with the stale snapshot + a separate bare-name entry.
+    expect(updated.plugins['new-plugin@official'][0].version).toBe('1.5.0');
+    expect(updated.plugins['new-plugin']).toBeUndefined();
+    expect(updated.plugins['existing-plugin@official'][0].version).toBe('1.0.0');
+  });
+
   it('keep strategy installs missing but never updates existing', async () => {
     writeInstalledPlugins({
       'existing-plugin@official': [{ version: '1.0.0', installedAt: '2026-01-01T00:00:00Z' }]
