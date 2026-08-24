@@ -243,10 +243,14 @@ describe('runShell', () => {
     expect(received).toContain('\\"hello\\"');
   });
 
-  it('default platform falls back to process.platform (Unix here)', async () => {
+  it('default platform falls back to process.platform', async () => {
     let received = null;
     const execAsync = async (cmd) => { received = cmd; return { stdout: '', stderr: '' }; };
     await runShell('ls', { execAsync });
-    expect(received).toBe('ls');
+    // No platform given: route through the shell for whatever platform this
+    // test runs on (PowerShell on win32, plain sh elsewhere).
+    expect(received).toBe(
+      process.platform === 'win32' ? 'powershell -NoProfile -Command "ls"' : 'ls'
+    );
   });
 });

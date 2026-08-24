@@ -244,7 +244,25 @@ export async function initRcloneRemote(config, {
  */
 export function detectCloudDirs({ home, existsSync, readdirSync, platform = process.platform } = {}) {
   const found = [];
-  const add = (label, dir) => { if (dir && existsSync(dir)) found.push({ label, dir }); };
+  // Only offer a cloud folder that is actually in use. Windows pre-creates
+  // ~/OneDrive (and some machines keep ~/iCloud Drive / ~/Dropbox leftovers)
+  // containing nothing but desktop.ini even when the sync client is unused —
+  // offering those just clutters the bundle-dir picker with dead choices.
+  // When readdirSync isn't available (tests / minimal callers), assume real.
+  const isRealCloudDir = (dir) => {
+    // macOS/Linux only create cloud folders when a sync client is actually
+    // installed, so existence is enough there — gate the leftover-filter to
+    // Windows so non-Windows behavior stays byte-for-byte unchanged.
+    if (platform !== 'win32' || !readdirSync) return true;
+    try {
+      return readdirSync(dir).some(e => e !== 'desktop.ini' && e !== '.DS_Store');
+    } catch {
+      return false;
+    }
+  };
+  const add = (label, dir) => {
+    if (dir && existsSync(dir) && isRealCloudDir(dir)) found.push({ label, dir });
+  };
 
   if (platform === 'darwin') {
     add('iCloud Drive', path.join(home, 'Library', 'Mobile Documents', 'com~apple~CloudDocs'));
@@ -395,7 +413,8 @@ async function runInit(config) {
   let statusMsg = null;
   const finalConfig = { ...config };
 
-  // DEC save/restore cursor (ESC 7 / ESC 8) — independent of ANSI ESC[s used by pickFromList
+  // DEC save/restore cursor (ESC 7 / ESC 8) anchors the whole init loop to a
+  // fixed position; pickFromList does its own in-place redraw via CSI cursor-up.
   process.stdout.write('\x1b7');
 
   while (true) {
@@ -1311,8 +1330,14 @@ async function runRestore(flags, config, argv = []) {
     } catch {
       // rename failed, try direct removal
       try { fs.rmSync(claudeDir, { recursive: true, force: true }); } catch {
-        // last resort: shell fallback for stubborn files
-        spawnSync('rm', ['-rf', claudeDir]);
+        // last resort: shell fallback for stubborn files. rm isn't a native
+        // Windows command (spawnSync would ENOENT), so use rmdir there,
+        // mirroring removeDir().
+        if (process.platform === 'win32') {
+          spawnSync('cmd', ['/c', 'rmdir', '/s', '/q', claudeDir]);
+        } else {
+          spawnSync('rm', ['-rf', claudeDir]);
+        }
       }
     }
     // Clean up the renamed old dir in background

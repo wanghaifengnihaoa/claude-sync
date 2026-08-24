@@ -140,7 +140,7 @@ describe('resolveManualBundleDir', () => {
   it('empty answer → platform default under home', async () => {
     const askText = vi.fn().mockResolvedValue('');
     const dir = await resolveManualBundleDir({ HOME: home }, { askText, home });
-    expect(dir).toBe('/Users/test/.claude-sync-bundle');
+    expect(dir).toBe(path.join(home, '.claude-sync-bundle'));
   });
 
   it('empty answer → keeps existing configured BUNDLE_DIR as default', async () => {
@@ -152,7 +152,7 @@ describe('resolveManualBundleDir', () => {
   it('expands a leading ~ in the typed path (iCloud interior ~ preserved)', async () => {
     const askText = vi.fn().mockResolvedValue('~/Library/Mobile Documents/com~apple~CloudDocs/claude-sync');
     const dir = await resolveManualBundleDir({ HOME: home }, { askText, home });
-    expect(dir).toBe('/Users/test/Library/Mobile Documents/com~apple~CloudDocs/claude-sync');
+    expect(dir).toBe(path.join(home, 'Library/Mobile Documents/com~apple~CloudDocs/claude-sync'));
   });
 
   it('keeps an absolute typed path as-is', async () => {
@@ -185,13 +185,13 @@ describe('confirmManualBundleDir', () => {
     const askText = vi.fn().mockResolvedValue('~/Desktop/newbundle');
     const res = await confirmManualBundleDir({ BUNDLE_DIR: '/cur/dir', HOME: home }, { askText, home });
     expect(res.changed).toBe(true);
-    expect(res.bundleDir).toBe('/Users/test/Desktop/newbundle');
+    expect(res.bundleDir).toBe(path.join(home, 'Desktop/newbundle'));
   });
 
   it('falls back to platform default when BUNDLE_DIR missing', async () => {
     const askText = vi.fn().mockResolvedValue('');
     const res = await confirmManualBundleDir({ HOME: home }, { askText, home });
-    expect(res.bundleDir).toBe('/Users/test/.claude-sync-bundle');
+    expect(res.bundleDir).toBe(path.join(home, '.claude-sync-bundle'));
     expect(res.changed).toBe(false);
   });
 
@@ -242,11 +242,20 @@ describe('detectCloudDirs', () => {
     expect(found.map(f => f.label)).toEqual(['OneDrive (Contoso)', 'Google Drive (a@b.com)']);
   });
 
-  it('Windows: detects ~/OneDrive', () => {
+  it('Windows: detects ~/OneDrive when it has real content', () => {
     const oneDrive = path.join(home, 'OneDrive');
     const existsSync = (p) => p === oneDrive;
-    const found = detectCloudDirs({ home, existsSync, platform: 'win32' });
+    const readdirSync = () => ['Documents', 'desktop.ini'];
+    const found = detectCloudDirs({ home, existsSync, readdirSync, platform: 'win32' });
     expect(found).toEqual([{ label: 'OneDrive', dir: oneDrive }]);
+  });
+
+  it('Windows: ignores empty ~/OneDrive leftover (only desktop.ini)', () => {
+    const oneDrive = path.join(home, 'OneDrive');
+    const existsSync = (p) => p === oneDrive;
+    const readdirSync = () => ['desktop.ini'];
+    const found = detectCloudDirs({ home, existsSync, readdirSync, platform: 'win32' });
+    expect(found).toEqual([]);
   });
 
   it('Windows: detects iCloud Drive with a space (official name)', () => {

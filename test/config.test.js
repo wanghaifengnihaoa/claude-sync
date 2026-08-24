@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import path from 'node:path';
 import { readConfig, getDefaultConfig, expandTilde } from '../lib/config.js';
 
 describe('getDefaultConfig', () => {
@@ -86,17 +87,17 @@ describe('expandTilde', () => {
   const home = '/Users/test';
 
   it('expands a leading ~/ to home', () => {
-    expect(expandTilde('~/foo', home)).toBe('/Users/test/foo');
+    expect(expandTilde('~/foo', home)).toBe(path.join(home, 'foo'));
   });
 
   it('expands an iCloud path while keeping the interior com~apple~ segment', () => {
     const out = expandTilde('~/Library/Mobile Documents/com~apple~CloudDocs/claude-sync', home);
-    expect(out).toBe('/Users/test/Library/Mobile Documents/com~apple~CloudDocs/claude-sync');
+    expect(out).toBe(path.join(home, 'Library/Mobile Documents/com~apple~CloudDocs/claude-sync'));
     expect(out.startsWith('~')).toBe(false);
   });
 
   it('expands ~ even without a trailing slash', () => {
-    expect(expandTilde('~mybundle', home)).toBe('/Users/test/mybundle');
+    expect(expandTilde('~mybundle', home)).toBe(path.join(home, 'mybundle'));
   });
 
   it('leaves absolute and Windows paths unchanged', () => {
