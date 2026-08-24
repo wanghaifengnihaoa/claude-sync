@@ -1,4 +1,5 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { execCli } from '../lib/workflow.js';
@@ -50,5 +51,40 @@ describe('execCli — win32 arg quoting', () => {
     // On any platform this exercises the direct-exec branch (mac/Linux contract).
     const out = execCli(process.execPath, ['-e', 'console.log("ok")'], { encoding: 'utf8' });
     expect(out.trim()).toBe('ok');
+  });
+});
+
+// The win32 branch exists because npm/npx/claude are installed as .cmd shims,
+// which cross-spawn routes through cmd.exe. The tests above use node.exe
+// (direct CreateProcess, no cmd.exe), so they never exercise the shim path the
+// original bug lived in. This case drives a real .cmd shim and pins the full
+// contract there: backslashes survive, spaces don't split, &/% aren't
+// interpreted. Windows-only (a .cmd file is meaningless on POSIX).
+describe.skipIf(process.platform !== 'win32')('execCli — .cmd shim forwarding', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-sync-shim-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('preserves backslash paths, spaces and metacharacters through a real .cmd shim', () => {
+    const echoJs = path.join(tmpDir, 'echo-argv.js');
+    // slice(2): skip node + script path; echo only the args the shim forwarded
+    fs.writeFileSync(echoJs, 'console.log(JSON.stringify(process.argv.slice(2)));');
+    const shim = path.join(tmpDir, 'fwd.cmd');
+    fs.writeFileSync(shim, `@echo off\r\nnode "${echoJs}" %*\r\n`);
+
+    const dest = 'C:\\Users\\Some User\\.claude\\skills\\my-skill';
+    const out = execCli(
+      shim,
+      ['a%PATH%b', 'x&echo INJ', dest],
+      { encoding: 'utf8' },
+      { platform: 'win32' }
+    );
+    expect(JSON.parse(out.trim())).toEqual(['a%PATH%b', 'x&echo INJ', dest]);
   });
 });

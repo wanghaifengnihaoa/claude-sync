@@ -91,6 +91,12 @@ describe('visibleLen — zero-width characters', () => {
   it('counts ZWJ within emoji sequences as zero width', () => {
     expect(visibleLen('\u{1F468}‍\u{1F469}‍\u{1F467}')).toBe(6); // 3 emoji × 2 columns
   });
+
+  it('counts zero-width space, word joiner and BOM as zero width', () => {
+    expect(visibleLen('a​b')).toBe(2);   // a + ZWSP + b
+    expect(visibleLen('a⁠b')).toBe(2);   // a + word joiner + b
+    expect(visibleLen('﻿a')).toBe(1);    // BOM + a
+  });
 });
 
 // ─────────────────────────────────────────────────────────────
