@@ -45,9 +45,9 @@ describe('execCli — win32 arg quoting', () => {
     }
     expect(caught).toBeInstanceOf(Error);
     expect(caught.status).toBe(3);
-    // execFileSync contract: string `code`, and stdout/stderr carried on the
-    // error for failure diagnostics — the win32 branch must match.
-    expect(caught.code).toBe('3');
+    // execFileSync non-zero-exit error carries stdout/stderr but NO string
+    // `code` (only spawn failures set code, e.g. 'ENOENT') — match that.
+    expect(caught.code).toBeUndefined();
     expect(caught.stdout).toBeDefined();
     expect(caught.stderr).toBeDefined();
   });
