@@ -355,58 +355,91 @@ describe('checkStatusLinePaths', () => {
 
 describe('handlePlugins', () => {
   let claudeDir;
+  let execCalls;
+
+  // Fake claude CLI: records invocations instead of running the real binary,
+  // which would install from the marketplace into the real user profile — a
+  // network + filesystem side effect tests must not have. Must be synchronous,
+  // matching execCli's contract (handlePlugins does not await it).
+  function fakeExec(cmd, args) {
+    execCalls.push({ cmd, args });
+    return Buffer.from('');
+  }
 
   beforeEach(() => {
     claudeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-sync-plugins-'));
+    execCalls = [];
   });
 
   afterEach(() => {
     fs.rmSync(claudeDir, { recursive: true, force: true });
   });
 
-  it('processes plugins when no claude CLI is available (graceful failure)', async () => {
-    // CC format with existing plugin
+  function writeInstalledPlugins(plugins) {
     const pluginsDir = path.join(claudeDir, 'plugins');
     fs.mkdirSync(pluginsDir, { recursive: true });
-    const initialPlugins = {
-      version: 2,
-      plugins: {
-        'existing-plugin@official': [{ version: '1.0.0', installedAt: '2026-01-01T00:00:00Z' }]
-      }
-    };
-    fs.writeFileSync(path.join(pluginsDir, 'installed_plugins.json'), JSON.stringify(initialPlugins));
+    fs.writeFileSync(
+      path.join(pluginsDir, 'installed_plugins.json'),
+      JSON.stringify({ version: 2, plugins })
+    );
+  }
 
-    // Try to install new plugins and update existing ones
-    const manifestPlugins = {
-      'existing-plugin': '2.0.0',  // needs update
-      'new-plugin': '1.5.0'         // needs install
-    };
+  it('cover strategy installs missing and updates outdated plugins', async () => {
+    writeInstalledPlugins({
+      'existing-plugin@official': [{ version: '1.0.0', installedAt: '2026-01-01T00:00:00Z' }]
+    });
+    await handlePlugins(
+      { 'existing-plugin': '2.0.0', 'new-plugin': '1.5.0' },
+      claudeDir,
+      'cover',
+      { exec: fakeExec }
+    );
 
-    // Should not throw even though claude CLI doesn't exist
-    await expect(
-      handlePlugins(manifestPlugins, claudeDir, 'cover')
-    ).resolves.toBeUndefined();
+    const cmds = execCalls.map(c => `${c.cmd} ${c.args.join(' ')}`);
+    expect(cmds).toContain('claude plugin uninstall existing-plugin');
+    expect(cmds).toContain('claude plugin install existing-plugin@2.0.0');
+    expect(cmds).toContain('claude plugin install new-plugin@1.5.0');
+
+    // installed_plugins.json reflects the new versions
+    const updated = JSON.parse(fs.readFileSync(path.join(claudeDir, 'plugins', 'installed_plugins.json'), 'utf-8'));
+    expect(updated.plugins['existing-plugin@official'][0].version).toBe('2.0.0');
+    expect(updated.plugins['new-plugin'][0].version).toBe('1.5.0');
   });
 
-  it('handles keep strategy—only installs missing, does not update', async () => {
-    const pluginsDir = path.join(claudeDir, 'plugins');
-    fs.mkdirSync(pluginsDir, { recursive: true });
-    const initialPlugins = {
-      version: 2,
-      plugins: {
-        'existing-plugin@official': [{ version: '1.0.0', installedAt: '2026-01-01T00:00:00Z' }]
-      }
-    };
-    fs.writeFileSync(path.join(pluginsDir, 'installed_plugins.json'), JSON.stringify(initialPlugins));
+  it('keep strategy installs missing but never updates existing', async () => {
+    writeInstalledPlugins({
+      'existing-plugin@official': [{ version: '1.0.0', installedAt: '2026-01-01T00:00:00Z' }]
+    });
+    await handlePlugins(
+      { 'existing-plugin': '2.0.0', 'new-plugin': '1.5.0' },
+      claudeDir,
+      'keep',
+      { exec: fakeExec }
+    );
 
-    const manifestPlugins = {
-      'existing-plugin': '2.0.0',  // different version, but keep strategy → skip
-      'new-plugin': '1.5.0'
-    };
+    const cmds = execCalls.map(c => `${c.cmd} ${c.args.join(' ')}`);
+    expect(cmds).toContain('claude plugin install new-plugin@1.5.0');
+    expect(cmds).not.toContain('claude plugin install existing-plugin@2.0.0');
+    expect(cmds).not.toContain('claude plugin uninstall existing-plugin');
+  });
 
-    await expect(
-      handlePlugins(manifestPlugins, claudeDir, 'keep')
-    ).resolves.toBeUndefined();
+  it('gracefully absorbs install failures and still resolves', async () => {
+    const failingExec = () => { throw new Error('claude: command not found'); };
+    const tmpBundle = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-sync-bundle-'));
+    try {
+      await expect(
+        handlePlugins(
+          { 'missing-plugin': '1.0.0' },
+          claudeDir,
+          'cover',
+          { exec: failingExec, scriptDir: tmpBundle }
+        )
+      ).resolves.toBeUndefined();
+      // fallback script written into the injected dir, not the real home
+      expect(fs.existsSync(path.join(tmpBundle, 'install-plugins.sh'))).toBe(true);
+    } finally {
+      fs.rmSync(tmpBundle, { recursive: true, force: true });
+    }
   });
 });
 
