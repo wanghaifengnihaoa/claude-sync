@@ -167,7 +167,7 @@ export async function initRcloneRemote(config, {
         '✗ rclone not found. Install it first, or pick another backend:',
         '  macOS:  brew install rclone',
         '  Linux:  curl https://rclone.org/install.sh | sudo bash',
-        '  Windows: scoop install rclone',
+        '  Windows: winget install Rclone.Rclone',
         '  Docs: https://rclone.org/install/'
       ]
     };

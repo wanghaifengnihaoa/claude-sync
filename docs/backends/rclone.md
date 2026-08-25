@@ -12,7 +12,7 @@ brew install rclone
 curl https://rclone.org/install.sh | sudo bash
 
 # Windows
-winget install rclone
+winget install Rclone.Rclone
 # 或从 https://rclone.org/downloads/ 下载
 ```
 
