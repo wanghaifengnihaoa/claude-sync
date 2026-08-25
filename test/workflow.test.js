@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -12,10 +12,20 @@ import {
   resolveSymlinksInDir,
   checkStatusLinePaths,
   copyDirContents,
+  copyIfMissing,
+  promptMemoryGlobalization,
   handlePlugins,
   getClaudeVersion
 } from '../lib/workflow.js';
+import { promptYesNo } from '../lib/prompt.js';
 import { detectSkills, classifySkill } from '../lib/detect.js';
+
+// workflow tests never exercise real interactive prompts; force the memory
+// globalization prompt to answer "yes" by default (per-test can override).
+vi.mock('../lib/prompt.js', async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual, promptYesNo: vi.fn().mockResolvedValue(true) };
+});
 
 // ==============================
 // extractMcpServers
@@ -266,6 +276,37 @@ describe('applyPathReplacement', () => {
   it('handles non-existent directory gracefully', () => {
     // Should not throw
     expect(() => applyPathReplacement('/non/existent', '/src', '/tgt')).not.toThrow();
+  });
+
+  it('cross-platform macOS source → Windows target keeps JSON valid', () => {
+    const filePath = path.join(tmpDir, 'settings.json');
+    // Realistic: a statusLine command that embeds the source home as a JSON
+    // string escape (\"...) — exactly the shape that broke on Windows.
+    fs.writeFileSync(filePath, JSON.stringify({
+      statusLine: {
+        type: 'command',
+        command: `bash -c '... exec \\"/Users/alice/.bun/bin/bun\\" --env-file /dev/null \\"${'${plugin_dir}'}src/index.ts\\"'`
+      },
+      env: { ANTHROPIC_MODEL: 'opus' }
+    }, null, 2));
+
+    applyPathReplacement(tmpDir, '/Users/alice', 'C:\\Users\\bob');
+
+    // Must still parse — a raw text replace would have left \U / \w escapes.
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    expect(parsed.statusLine.command).toContain('C:\\Users\\bob/.bun/bin/bun');
+    expect(parsed.statusLine.command).not.toContain('/Users/alice');
+    expect(parsed.env.ANTHROPIC_MODEL).toBe('opus');
+  });
+
+  it('skips a .json file that is not valid JSON', () => {
+    const filePath = path.join(tmpDir, 'settings.json');
+    fs.writeFileSync(filePath, '{ this is not valid json /Users/alice');
+    const before = fs.readFileSync(filePath, 'utf-8');
+
+    expect(() => applyPathReplacement(tmpDir, '/Users/alice', 'C:\\Users\\bob')).not.toThrow();
+    // File must be left byte-identical, not partially rewritten.
+    expect(fs.readFileSync(filePath, 'utf-8')).toBe(before);
   });
 });
 
@@ -880,5 +921,166 @@ describe('Push pipeline — skills processing', () => {
     const md = path.join(childDir, 'SKILL.md');
     expect(fs.lstatSync(md).isSymbolicLink()).toBe(false);
     expect(fs.readFileSync(md, 'utf-8')).toBe('---\nname: sub-skill-d\n---\n# Ship workflow\n');
+  });
+});
+
+// ==============================
+// copyIfMissing — keep-strategy JSON fill-the-gaps
+// ==============================
+describe('copyIfMissing', () => {
+  let srcDir, destDir;
+
+  beforeEach(() => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cs-copy-'));
+    srcDir = path.join(tmpDir, 'src');
+    destDir = path.join(tmpDir, 'dest');
+    fs.mkdirSync(srcDir, { recursive: true });
+    fs.mkdirSync(destDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(path.dirname(srcDir), { recursive: true, force: true });
+  });
+
+  it('adds remote keys to an existing local JSON, keeping local values', () => {
+    fs.writeFileSync(path.join(destDir, 'settings.json'), JSON.stringify({ autoMemoryDirectory: '~/.claude/shared-memory' }));
+    fs.writeFileSync(path.join(srcDir, 'settings.json'), JSON.stringify({
+      autoMemoryDirectory: '~/.claude/shared-memory',
+      model: 'opus',
+      env: { ANTHROPIC_MODEL: 'opus', ANTHROPIC_AUTH_TOKEN: 'secret' }
+    }));
+
+    copyIfMissing(srcDir, destDir);
+
+    const merged = JSON.parse(fs.readFileSync(path.join(destDir, 'settings.json'), 'utf-8'));
+    expect(merged.autoMemoryDirectory).toBe('~/.claude/shared-memory');
+    expect(merged.model).toBe('opus');
+    expect(merged.env.ANTHROPIC_MODEL).toBe('opus');
+  });
+
+  it('does not overwrite local values that differ from remote', () => {
+    fs.writeFileSync(path.join(destDir, 'settings.json'), JSON.stringify({ model: 'sonnet' }));
+    fs.writeFileSync(path.join(srcDir, 'settings.json'), JSON.stringify({ model: 'opus', tui: 'fullscreen' }));
+
+    copyIfMissing(srcDir, destDir);
+
+    const merged = JSON.parse(fs.readFileSync(path.join(destDir, 'settings.json'), 'utf-8'));
+    expect(merged.model).toBe('sonnet');       // local wins
+    expect(merged.tui).toBe('fullscreen');     // remote-only key added
+  });
+
+  it('copies a missing JSON file', () => {
+    fs.writeFileSync(path.join(srcDir, 'settings.json'), JSON.stringify({ model: 'opus' }));
+
+    copyIfMissing(srcDir, destDir);
+
+    expect(fs.existsSync(path.join(destDir, 'settings.json'))).toBe(true);
+    expect(JSON.parse(fs.readFileSync(path.join(destDir, 'settings.json'), 'utf-8')).model).toBe('opus');
+  });
+
+  it('does not overwrite an existing non-JSON file', () => {
+    fs.writeFileSync(path.join(destDir, 'CLAUDE.md'), 'local');
+    fs.writeFileSync(path.join(srcDir, 'CLAUDE.md'), 'remote');
+
+    copyIfMissing(srcDir, destDir);
+
+    expect(fs.readFileSync(path.join(destDir, 'CLAUDE.md'), 'utf-8')).toBe('local');
+  });
+
+  it('leaves an unparseable local JSON untouched', () => {
+    fs.writeFileSync(path.join(destDir, 'settings.json'), '{ broken');
+    fs.writeFileSync(path.join(srcDir, 'settings.json'), JSON.stringify({ model: 'opus' }));
+
+    copyIfMissing(srcDir, destDir);
+
+    expect(fs.readFileSync(path.join(destDir, 'settings.json'), 'utf-8')).toBe('{ broken');
+  });
+});
+
+// ==============================
+// promptMemoryGlobalization — never wipe settings.json
+// ==============================
+describe('promptMemoryGlobalization', () => {
+  let claudeDir, extractDir, userHome;
+
+  beforeEach(() => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cs-memglob-'));
+    claudeDir = path.join(tmpDir, 'claude');
+    extractDir = path.join(tmpDir, 'extracted');
+    userHome = tmpDir;
+    fs.mkdirSync(claudeDir, { recursive: true });
+    fs.mkdirSync(extractDir, { recursive: true });
+    promptYesNo.mockClear();
+    promptYesNo.mockResolvedValue(true);
+  });
+
+  afterEach(() => {
+    fs.rmSync(path.dirname(claudeDir), { recursive: true, force: true });
+  });
+
+  const memInfo = { topic_count: 2, auto_memory_directory: '~/.claude/shared-memory' };
+
+  it('restores full remote settings when local settings.json is missing', async () => {
+    const bundleSettings = {
+      model: 'opus',
+      env: { ANTHROPIC_MODEL: 'opus', ANTHROPIC_AUTH_TOKEN: 'sk-real' },
+      statusLine: { type: 'command', command: 'echo hi' }
+    };
+    fs.writeFileSync(path.join(extractDir, 'settings.json'), JSON.stringify(bundleSettings, null, 2));
+    fs.mkdirSync(path.join(extractDir, 'shared-memory'), { recursive: true });
+    fs.writeFileSync(path.join(extractDir, 'shared-memory', 't.md'), '# t');
+
+    await promptMemoryGlobalization(claudeDir, userHome, extractDir, memInfo, 'keep');
+
+    const written = JSON.parse(fs.readFileSync(path.join(claudeDir, 'settings.json'), 'utf-8'));
+    expect(written.autoMemoryDirectory).toBe('~/.claude/shared-memory');
+    // Other remote keys must survive — this is the regression that wiped config.
+    expect(written.model).toBe('opus');
+    expect(written.env.ANTHROPIC_AUTH_TOKEN).toBe('sk-real');
+  });
+
+  it('recovers full remote settings when local settings.json is corrupt JSON', async () => {
+    // The original regression: applyPathReplacement's raw-text pass broke
+    // settings.json with invalid escapes (e.g. "C:\Users\..." → \U), and the
+    // old `settings || {}` wiped every other key. readSettings() returns null
+    // on corrupt JSON, which must fall back to the bundle copy — not {}.
+    fs.writeFileSync(path.join(claudeDir, 'settings.json'), '{ "model": "opus", "env": "broken\\U' );
+    const bundleSettings = {
+      model: 'opus',
+      env: { ANTHROPIC_MODEL: 'opus', ANTHROPIC_AUTH_TOKEN: 'sk-real' },
+      statusLine: { type: 'command', command: 'echo hi' }
+    };
+    fs.writeFileSync(path.join(extractDir, 'settings.json'), JSON.stringify(bundleSettings, null, 2));
+    fs.mkdirSync(path.join(extractDir, 'shared-memory'), { recursive: true });
+    fs.writeFileSync(path.join(extractDir, 'shared-memory', 't.md'), '# t');
+
+    await promptMemoryGlobalization(claudeDir, userHome, extractDir, memInfo, 'keep');
+
+    const written = JSON.parse(fs.readFileSync(path.join(claudeDir, 'settings.json'), 'utf-8'));
+    expect(written.autoMemoryDirectory).toBe('~/.claude/shared-memory');
+    // Full remote config must be restored, not wiped to {}.
+    expect(written.model).toBe('opus');
+    expect(written.env.ANTHROPIC_AUTH_TOKEN).toBe('sk-real');
+    expect(written.statusLine.command).toBe('echo hi');
+  });
+
+  it('keeps a valid local settings.json and only adds autoMemoryDirectory', async () => {
+    fs.writeFileSync(path.join(claudeDir, 'settings.json'), JSON.stringify({ model: 'sonnet' }));
+    fs.writeFileSync(path.join(extractDir, 'settings.json'), JSON.stringify({ model: 'opus' }));
+
+    await promptMemoryGlobalization(claudeDir, userHome, extractDir, memInfo, 'keep');
+
+    const written = JSON.parse(fs.readFileSync(path.join(claudeDir, 'settings.json'), 'utf-8'));
+    expect(written.model).toBe('sonnet');
+    expect(written.autoMemoryDirectory).toBe('~/.claude/shared-memory');
+  });
+
+  it('does not write settings.json when the user declines', async () => {
+    fs.writeFileSync(path.join(extractDir, 'settings.json'), JSON.stringify({ model: 'opus' }));
+    promptYesNo.mockResolvedValueOnce(false);
+
+    await promptMemoryGlobalization(claudeDir, userHome, extractDir, memInfo, 'keep');
+
+    expect(fs.existsSync(path.join(claudeDir, 'settings.json'))).toBe(false);
   });
 });
