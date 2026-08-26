@@ -24,7 +24,7 @@ import { pushWorkflow, pullWorkflow, readSettings, extractMcpServers, countMemor
 import { createRcloneBackend } from './backends/rclone.js';
 import { createManualBackend } from './backends/manual.js';
 import { createCustomBackend } from './backends/custom.js';
-import { readManifest, hashFile, readPluginVersions } from './lib/sync.js';
+import { readManifest, hashFile, readPluginInstalls, indexPluginsByBareName, pluginMarketplaceFromKey } from './lib/sync.js';
 import { detectSkills } from './lib/detect.js';
 
 const KNOWN_COMMANDS = ['push', 'pull', 'init', 'status', 'diff', 'restore', 'help'];
@@ -738,28 +738,45 @@ export async function runStatus(config, backend) {
     // === Plugin comparison ===
     console.log();
     console.log('── Plugins ──');
-    const localPlugins = readPluginVersions(path.join(config.CLAUDE_DIR, 'plugins'));
-    const allPluginNames = new Set([
-      ...Object.keys(manifest.plugins || {}),
-      ...Object.keys(localPlugins)
-    ]);
+    const localPlugins = readPluginInstalls(path.join(config.CLAUDE_DIR, 'plugins'));
+    // Manifest keys are "name@marketplace"; compare by bare name, but show the
+    // full marketplace-qualified key so the source is unambiguous.
+    const localByName = indexPluginsByBareName(localPlugins);
+    const remoteByName = indexPluginsByBareName(manifest.plugins || {});
+
+    const allPluginNames = new Set([...Object.keys(localByName), ...Object.keys(remoteByName)]);
 
     if (allPluginNames.size === 0) {
       console.log('  (no plugins)');
     } else {
-      for (const name of [...allPluginNames].sort()) {
-        const localVer = localPlugins[name];
-        const remoteVer = manifest.plugins?.[name];
-        if (!localVer) {
-          console.log(`+  ${name}@${remoteVer} (remote only)`);
+      for (const bare of [...allPluginNames].sort()) {
+        const local = localByName[bare];
+        const remote = remoteByName[bare];
+        const label = remote?.key || local?.key || bare;
+        if (!local) {
+          // Legacy manifest keys carry no marketplace — pull still attempts a
+          // default-marketplace install, so say what pull will actually do.
+          const manual = remote && pluginMarketplaceFromKey(remote.key) === null ? ' (no marketplace — pull will attempt default-marketplace install)' : '';
+          console.log(`+  ${label} v${remote.version} (remote only)${manual}`);
           differences++;
-        } else if (!remoteVer) {
-          console.log(`-  ${name}@${localVer} (local only)`);
+        } else if (!remote) {
+          console.log(`-  ${label} v${local.version} (local only)`);
           differences++;
-        } else if (localVer === remoteVer) {
-          console.log(`   ${name}@${localVer}`);
+        } else if (local.cached === false) {
+          // Registry records the plugin but its files are gone — pull will
+          // attempt to reinstall it, so status must not claim "in sync".
+          console.log(`~  ${label}: recorded v${local.version} but cache missing (pull will attempt reinstall)`);
+          differences++;
+        } else if (local.version === remote.version && local.key === remote.key) {
+          console.log(`   ${label} v${local.version}`);
+        } else if (local.version === remote.version) {
+          // Same version but installed from a different marketplace (or the
+          // manifest key carries none) — the same divergence pull hints at;
+          // status must not claim "in sync".
+          console.log(`~  ${label}: local ${local.key} remote ${remote.key} (same version, different/no marketplace)`);
+          differences++;
         } else {
-          console.log(`~  ${name}: local=${localVer} remote=${remoteVer}`);
+          console.log(`~  ${label}: local v${local.version} remote v${remote.version} (pull will not reinstall)`);
           differences++;
         }
       }
@@ -1034,22 +1051,35 @@ export async function runDiff(config, backend) {
     if (manifest.plugins && Object.keys(manifest.plugins).length > 0) {
       console.log();
       console.log('--- Plugins ---');
-      const localPlugins = readPluginVersions(path.join(config.CLAUDE_DIR, 'plugins'));
-      for (const [name, ver] of Object.entries(manifest.plugins)) {
-        const localVer = localPlugins[name];
-        if (!localVer) {
-          console.log(`  + ${name}@${ver} (remote only)`);
+      const localPlugins = readPluginInstalls(path.join(config.CLAUDE_DIR, 'plugins'));
+      // Match by bare name; show the full marketplace-qualified key.
+      const localByName = indexPluginsByBareName(localPlugins);
+      const remoteByName = indexPluginsByBareName(manifest.plugins);
+
+      for (const bare of Object.keys(remoteByName)) {
+        const remote = remoteByName[bare];
+        const local = localByName[bare];
+        if (!local) {
+          // Legacy bare keys: pull attempts a default-marketplace install.
+          const manual = pluginMarketplaceFromKey(remote.key) === null ? ' (no marketplace — pull will attempt default-marketplace install)' : '';
+          console.log(`  + ${remote.key} v${remote.version} (remote only)${manual}`);
           differences++;
-        } else if (localVer !== ver) {
-          console.log(`  ~ ${name}: local=${localVer} remote=${ver}`);
+        } else if (local.cached === false) {
+          console.log(`  ~ ${remote.key}: recorded v${local.version} but cache missing (pull will attempt reinstall)`);
+          differences++;
+        } else if (local.version !== remote.version) {
+          console.log(`  ~ ${remote.key}: local v${local.version} remote v${remote.version} (pull will not reinstall)`);
+          differences++;
+        } else if (local.key !== remote.key) {
+          console.log(`  ~ ${remote.key}: local ${local.key} remote ${remote.key} (same version, different/no marketplace)`);
           differences++;
         } else {
-          console.log(`    ${name}@${ver}`);
+          console.log(`    ${remote.key} v${remote.version}`);
         }
       }
-      for (const [name, ver] of Object.entries(localPlugins)) {
-        if (!manifest.plugins[name]) {
-          console.log(`  - ${name}@${ver} (local only)`);
+      for (const [bare, local] of Object.entries(localByName)) {
+        if (!remoteByName[bare]) {
+          console.log(`  - ${local.key} v${local.version} (local only)`);
           differences++;
         }
       }

@@ -425,26 +425,26 @@ describe('handlePlugins', () => {
     );
   }
 
-  it('cover strategy installs missing and updates outdated plugins', async () => {
+  it('installs missing plugins from their marketplace and skips version-mismatched ones', async () => {
     writeInstalledPlugins({
       'existing-plugin@official': [{ version: '1.0.0', installedAt: '2026-01-01T00:00:00Z' }]
     });
     await handlePlugins(
-      { 'existing-plugin': '2.0.0', 'new-plugin': '1.5.0' },
+      { 'existing-plugin@official': '2.0.0', 'new-plugin@official': '1.5.0' },
       claudeDir,
-      'cover',
       { exec: fakeExec }
     );
 
     const cmds = execCalls.map(c => `${c.cmd} ${c.args.join(' ')}`);
-    expect(cmds).toContain('claude plugin uninstall existing-plugin');
-    expect(cmds).toContain('claude plugin install existing-plugin@2.0.0');
-    expect(cmds).toContain('claude plugin install new-plugin@1.5.0');
+    expect(cmds).toContain('claude plugin install new-plugin@official');
+    // local plugin exists → version mismatch is reported, never reinstalled
+    expect(cmds).not.toContain('claude plugin install existing-plugin@official');
+    expect(cmds).not.toContain('claude plugin uninstall existing-plugin');
 
-    // installed_plugins.json reflects the new versions
+    // installed_plugins.json: only the new install is recorded
     const updated = JSON.parse(fs.readFileSync(path.join(claudeDir, 'plugins', 'installed_plugins.json'), 'utf-8'));
-    expect(updated.plugins['existing-plugin@official'][0].version).toBe('2.0.0');
-    expect(updated.plugins['new-plugin'][0].version).toBe('1.5.0');
+    expect(updated.plugins['existing-plugin@official'][0].version).toBe('1.0.0');
+    expect(updated.plugins['new-plugin@official'][0].version).toBe('1.5.0');
   });
 
   it('preserves claude CLI writes to installed_plugins.json after install', async () => {
@@ -458,28 +458,29 @@ describe('handlePlugins', () => {
     const execWrites = (cmd, args) => {
       execCalls.push({ cmd, args });
       if (cmd === 'claude' && args[0] === 'plugin' && args[1] === 'install') {
-        const full = args[2];
-        const at = full.lastIndexOf('@');
-        const name = full.slice(0, at);
-        const version = full.slice(at + 1);
+        // args[2] is "new-plugin@official" — the CLI writes that full key.
+        // The installed version (1.4.0) may differ from the manifest record
+        // (1.5.0): Claude Code installs the catalog's current version.
+        const fullKey = args[2];
         const pluginsPath = path.join(claudeDir, 'plugins', 'installed_plugins.json');
         const raw = JSON.parse(fs.readFileSync(pluginsPath, 'utf-8'));
-        raw.plugins[`${name}@official`] = [{ version, installedAt: '2026-01-01T00:00:00Z' }];
+        raw.plugins[fullKey] = [{ scope: 'user', version: '1.4.0', installedAt: '2026-01-01T00:00:00Z', lastUpdated: '2026-01-01T00:00:00Z' }];
         fs.writeFileSync(pluginsPath, JSON.stringify(raw, null, 2));
       }
       return Buffer.from('');
     };
     await handlePlugins(
-      { 'new-plugin': '1.5.0' },
+      { 'new-plugin@official': '1.5.0' },
       claudeDir,
-      'cover',
       { exec: execWrites }
     );
 
     const updated = JSON.parse(fs.readFileSync(path.join(claudeDir, 'plugins', 'installed_plugins.json'), 'utf-8'));
-    // claude wrote new-plugin@official; write-back must keep that key, not
-    // overwrite it with the stale snapshot + a separate bare-name entry.
-    expect(updated.plugins['new-plugin@official'][0].version).toBe('1.5.0');
+    // claude wrote new-plugin@official with the REAL installed record; write-back
+    // must keep that key AND its actual version/scope/lastUpdated, not overwrite
+    // it with the manifest's version or a bare-name entry.
+    expect(updated.plugins['new-plugin@official'][0].version).toBe('1.4.0');
+    expect(updated.plugins['new-plugin@official'][0].scope).toBe('user');
     expect(updated.plugins['new-plugin']).toBeUndefined();
     expect(updated.plugins['existing-plugin@official'][0].version).toBe('1.0.0');
   });
@@ -489,11 +490,12 @@ describe('handlePlugins', () => {
     fs.mkdirSync(pluginsDir, { recursive: true });
     fs.writeFileSync(path.join(pluginsDir, 'installed_plugins.json'), 'null');
     await expect(
-      handlePlugins({ 'new-plugin': '1.0.0' }, claudeDir, 'cover', { exec: fakeExec })
+      handlePlugins({ 'new-plugin@official': '1.0.0' }, claudeDir, { exec: fakeExec })
     ).resolves.toBeUndefined();
-    // null content falls back to the flat legacy shape rather than crashing
+    // null content falls back to the flat legacy shape rather than crashing;
+    // the full name@marketplace key is kept so the marketplace survives
     const updated = JSON.parse(fs.readFileSync(path.join(pluginsDir, 'installed_plugins.json'), 'utf-8'));
-    expect(updated['new-plugin']).toBe('1.0.0');
+    expect(updated['new-plugin@official']).toBe('1.0.0');
   });
 
   it('re-reads the format switch from legacy flat to CC after install', async () => {
@@ -506,19 +508,16 @@ describe('handlePlugins', () => {
     const execWrites = (cmd, args) => {
       execCalls.push({ cmd, args });
       if (cmd === 'claude' && args[0] === 'plugin' && args[1] === 'install') {
-        const full = args[2];
-        const at = full.lastIndexOf('@');
-        const name = full.slice(0, at);
-        const version = full.slice(at + 1);
+        const fullKey = args[2];
         const pluginsPath = path.join(pluginsDir, 'installed_plugins.json');
         const raw = JSON.parse(fs.readFileSync(pluginsPath, 'utf-8'));
         raw.plugins = raw.plugins || {};
-        raw.plugins[`${name}@official`] = [{ version, installedAt: '2026-01-01T00:00:00Z' }];
+        raw.plugins[fullKey] = [{ version: '1.5.0', installedAt: '2026-01-01T00:00:00Z' }];
         fs.writeFileSync(pluginsPath, JSON.stringify(raw, null, 2));
       }
       return Buffer.from('');
     };
-    await handlePlugins({ 'new-plugin': '1.5.0' }, claudeDir, 'cover', { exec: execWrites });
+    await handlePlugins({ 'new-plugin@official': '1.5.0' }, claudeDir, { exec: execWrites });
     const updated = JSON.parse(fs.readFileSync(path.join(pluginsDir, 'installed_plugins.json'), 'utf-8'));
     expect(updated.plugins['new-plugin@official'][0].version).toBe('1.5.0');
   });
@@ -530,7 +529,7 @@ describe('handlePlugins', () => {
     // exec that throws for the exact install command, succeeds otherwise
     const failingInstall = (cmd, args) => {
       execCalls.push({ cmd, args });
-      if (cmd === 'claude' && args[0] === 'plugin' && args[1] === 'install' && args[2] === 'bad-plugin@1.0.0') {
+      if (cmd === 'claude' && args[0] === 'plugin' && args[1] === 'install' && args[2] === 'bad-plugin@official') {
         throw new Error('marketplace unreachable');
       }
       return Buffer.from('');
@@ -538,73 +537,380 @@ describe('handlePlugins', () => {
     const tmpBundle = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-sync-bundle-'));
     try {
       await handlePlugins(
-        { 'bad-plugin': '1.0.0' },
+        { 'bad-plugin@official': '1.0.0' },
         claudeDir,
-        'cover',
         { exec: failingInstall, scriptDir: tmpBundle }
       );
-      // fallback script still generated for the failed op
-      expect(fs.existsSync(path.join(tmpBundle, 'install-plugins.sh'))).toBe(true);
+      // fallback script still generated for the failed op, with the correct syntax
+      const script = fs.readFileSync(path.join(tmpBundle, 'install-plugins.sh'), 'utf-8');
+      expect(script).toContain('claude plugin install bad-plugin@official');
     } finally {
       fs.rmSync(tmpBundle, { recursive: true, force: true });
     }
-    // the file must NOT claim bad-plugin@1.0.0 is installed, or the next sync
+    // the file must NOT claim bad-plugin@official is installed, or the next sync
     // would skip it and the plugin would never get installed.
     const updated = JSON.parse(fs.readFileSync(path.join(pluginsDir, 'installed_plugins.json'), 'utf-8'));
-    expect(updated.plugins['bad-plugin']).toBeUndefined();
     expect(updated.plugins['bad-plugin@official']).toBeUndefined();
   });
 
-  it('does not record a failed update that rolled back as the new version', async () => {
-    writeInstalledPlugins({
-      'existing-plugin@official': [{ version: '1.0.0', installedAt: '2026-01-01T00:00:00Z' }]
-    });
-    // exec that throws for the target update version but lets the rollback pass
-    const failingUpdate = (cmd, args) => {
-      execCalls.push({ cmd, args });
-      if (cmd === 'claude' && args[0] === 'plugin' && args[1] === 'install' && args[2] === 'existing-plugin@2.0.0') {
-        throw new Error('version not found on marketplace');
-      }
-      return Buffer.from('');
-    };
-    const tmpBundle = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-sync-bundle-'));
-    try {
-      await handlePlugins(
-        { 'existing-plugin': '2.0.0' },
-        claudeDir,
-        'cover',
-        { exec: failingUpdate, scriptDir: tmpBundle }
-      );
-      // rollback attempted, and the fallback script still carries the target version
-      const cmds = execCalls.map(c => `${c.cmd} ${c.args.join(' ')}`);
-      expect(cmds).toContain('claude plugin uninstall existing-plugin');
-      expect(cmds).toContain('claude plugin install existing-plugin@2.0.0');
-      expect(cmds).toContain('claude plugin install existing-plugin@1.0.0');
-      const script = fs.readFileSync(path.join(tmpBundle, 'install-plugins.sh'), 'utf-8');
-      expect(script).toContain('claude plugin install existing-plugin@2.0.0');
-    } finally {
-      fs.rmSync(tmpBundle, { recursive: true, force: true });
-    }
-    // the file must still record the rolled-back version, so the next sync
-    // retries the update instead of thinking 2.0.0 is already in place.
-    const updated = JSON.parse(fs.readFileSync(path.join(claudeDir, 'plugins', 'installed_plugins.json'), 'utf-8'));
-    expect(updated.plugins['existing-plugin@official'][0].version).toBe('1.0.0');
-  });
-
-  it('keep strategy installs missing but never updates existing', async () => {
+  it('version mismatch is reported but never reinstalls', async () => {
     writeInstalledPlugins({
       'existing-plugin@official': [{ version: '1.0.0', installedAt: '2026-01-01T00:00:00Z' }]
     });
     await handlePlugins(
-      { 'existing-plugin': '2.0.0', 'new-plugin': '1.5.0' },
+      { 'existing-plugin@official': '2.0.0' },
       claudeDir,
-      'keep',
+      { exec: fakeExec }
+    );
+    // no install/uninstall/rollback — Claude Code can't pin versions, so a
+    // mismatched local plugin is left alone rather than upgraded.
+    expect(execCalls).toEqual([]);
+    const updated = JSON.parse(fs.readFileSync(path.join(claudeDir, 'plugins', 'installed_plugins.json'), 'utf-8'));
+    expect(updated.plugins['existing-plugin@official'][0].version).toBe('1.0.0');
+  });
+
+  it('hints when a plugin is installed from a different marketplace at the same version', async () => {
+    // Same bare name + same version, but the local install came from a different
+    // marketplace than the manifest records. The plugin is present, so per the
+    // design decision it is never reinstalled — but the divergence must be
+    // surfaced, or the wrong-marketplace install would silently persist (and the
+    // next push would record the wrong marketplace in the manifest).
+    writeInstalledPlugins({
+      'existing-plugin@community': [{ version: '1.0.0', installedAt: '2026-01-01T00:00:00Z' }]
+    });
+    const logs = [];
+    const spy = vi.spyOn(console, 'log').mockImplementation((...args) => logs.push(args.map(String).join(' ')));
+    try {
+      await handlePlugins(
+        { 'existing-plugin@official': '1.0.0' },
+        claudeDir,
+        { exec: fakeExec }
+      );
+    } finally {
+      spy.mockRestore();
+    }
+    // never reinstalls a present plugin, regardless of marketplace
+    expect(execCalls).toEqual([]);
+    // ...but the divergence is surfaced, not silently dropped
+    expect(logs.some(l => l.includes("already installed as 'existing-plugin@community' but manifest records 'existing-plugin@official'"))).toBe(true);
+  });
+
+  it('reinstalls when the registry records a plugin but its cached files are gone', async () => {
+    // A restore drops the cache directory while installed_plugins.json survives.
+    // The registry record points at an installPath that no longer exists — the
+    // plugin is recorded but unusable, so pull must reinstall it, not trust the
+    // record (otherwise the plugin stays broken while status claims it is in sync).
+    const installPath = path.join(claudeDir, 'plugins', 'cache', 'claude-plugins-official', 'existing-plugin', '1.0.0');
+    writeInstalledPlugins({
+      'existing-plugin@claude-plugins-official': [{ version: '1.0.0', installedAt: '2026-01-01T00:00:00Z', installPath }]
+    });
+    await handlePlugins(
+      { 'existing-plugin@claude-plugins-official': '1.0.0' },
+      claudeDir,
+      { exec: fakeExec }
+    );
+    const cmds = execCalls.map(c => `${c.cmd} ${c.args.join(' ')}`);
+    expect(cmds).toContain('claude plugin install existing-plugin@claude-plugins-official');
+  });
+
+  it('does not reinstall when the cached installPath still has content', async () => {
+    const installPath = path.join(claudeDir, 'plugins', 'cache', 'claude-plugins-official', 'existing-plugin', '1.0.0');
+    fs.mkdirSync(installPath, { recursive: true });
+    fs.writeFileSync(path.join(installPath, 'plugin.js'), '// installed');
+    writeInstalledPlugins({
+      'existing-plugin@claude-plugins-official': [{ version: '1.0.0', installedAt: '2026-01-01T00:00:00Z', installPath }]
+    });
+    await handlePlugins(
+      { 'existing-plugin@claude-plugins-official': '1.0.0' },
+      claudeDir,
+      { exec: fakeExec }
+    );
+    // present + same version + same marketplace → nothing to do
+    expect(execCalls).toEqual([]);
+  });
+
+  it('aligns a dangling installPath to the actual cached version after a cover pull', async () => {
+    // A cover pull restores the source's registry record verbatim — claimed
+    // version 6.1.0 + the source's installPath. This machine cached 6.3.0, so
+    // the plugin is present (claimed 6.1.0 ≤ cached 6.3.0 → cached=true) and
+    // NOT reinstalled; without alignment the registry keeps the source's claim
+    // with a dangling installPath, and CC's panel reports "not cached at 6.1.0"
+    // even though the plugin is installed and usable. The first pull only
+    // "worked" because a reinstall made the CLI rewrite the record — every
+    // subsequent cover pull re-broke it.
+    const danglingPath = path.join(claudeDir, 'plugins', 'cache', 'claude-plugins-official', 'existing-plugin', '6.1.0');
+    const cachedPath = path.join(claudeDir, 'plugins', 'cache', 'claude-plugins-official', 'existing-plugin', '6.3.0');
+    fs.mkdirSync(cachedPath, { recursive: true });
+    fs.writeFileSync(path.join(cachedPath, 'plugin.js'), '// installed');
+    writeInstalledPlugins({
+      'existing-plugin@claude-plugins-official': [{ version: '6.1.0', installedAt: '2026-01-01T00:00:00Z', installPath: danglingPath }]
+    });
+
+    await handlePlugins(
+      { 'existing-plugin@claude-plugins-official': '6.1.0' },
+      claudeDir,
+      { exec: fakeExec }
+    );
+
+    // present (claimed ≤ cached) → never reinstalled
+    expect(execCalls).toEqual([]);
+    // record aligned to the real cached version + path so CC's panel resolves
+    const updated = JSON.parse(fs.readFileSync(path.join(claudeDir, 'plugins', 'installed_plugins.json'), 'utf-8'));
+    expect(updated.plugins['existing-plugin@claude-plugins-official'][0].version).toBe('6.3.0');
+    expect(updated.plugins['existing-plugin@claude-plugins-official'][0].installPath).toBe(cachedPath);
+  });
+
+  it('aligns a dangling installPath to a SHA-cached dir when the claimed version is a SHA', async () => {
+    // skill-creator/frontend-design-style claim: the manifest records a git SHA
+    // as the version and a source installPath. The plugin is present (SHA claims
+    // are always treated as cached) so it is not reinstalled; alignment must
+    // point the record at the actual cached SHA dir.
+    const danglingPath = path.join(claudeDir, 'plugins', 'cache', 'claude-plugins-official', 'existing-plugin', 'd6947b6f35ad');
+    const cachedPath = path.join(claudeDir, 'plugins', 'cache', 'claude-plugins-official', 'existing-plugin', 'b819188d2eea');
+    fs.mkdirSync(cachedPath, { recursive: true });
+    fs.writeFileSync(path.join(cachedPath, 'plugin.js'), '// installed');
+    writeInstalledPlugins({
+      'existing-plugin@claude-plugins-official': [{ version: 'd6947b6f35ad', installedAt: '2026-01-01T00:00:00Z', installPath: danglingPath }]
+    });
+
+    await handlePlugins(
+      { 'existing-plugin@claude-plugins-official': 'd6947b6f35ad' },
+      claudeDir,
+      { exec: fakeExec }
+    );
+
+    expect(execCalls).toEqual([]);
+    const updated = JSON.parse(fs.readFileSync(path.join(claudeDir, 'plugins', 'installed_plugins.json'), 'utf-8'));
+    expect(updated.plugins['existing-plugin@claude-plugins-official'][0].version).toBe('b819188d2eea');
+    expect(updated.plugins['existing-plugin@claude-plugins-official'][0].installPath).toBe(cachedPath);
+  });
+
+  it('does not align when the plugin is genuinely absent (nothing cached)', async () => {
+    // No cache dir at all → the record stays as-is so the reinstall logic owns
+    // the key; alignment must not fabricate a version/path out of thin air.
+    const installPath = path.join(claudeDir, 'plugins', 'cache', 'claude-plugins-official', 'existing-plugin', '1.0.0');
+    writeInstalledPlugins({
+      'existing-plugin@claude-plugins-official': [{ version: '1.0.0', installedAt: '2026-01-01T00:00:00Z', installPath }]
+    });
+    await handlePlugins(
+      { 'existing-plugin@claude-plugins-official': '1.0.0' },
+      claudeDir,
+      { exec: fakeExec }
+    );
+    // reinstalled (cache genuinely missing), record untouched by alignment
+    const cmds = execCalls.map(c => `${c.cmd} ${c.args.join(' ')}`);
+    expect(cmds).toContain('claude plugin install existing-plugin@claude-plugins-official');
+  });
+
+  it('converges: reinstalls once when the cache is missing, then leaves it alone', async () => {
+    // A restore drops the cache dir. First pull reinstalls and, in reality,
+    // `claude plugin install` writes the cache files back. A SECOND pull must
+    // not reinstall again — the installPath now has content, so the missing
+    // record resolves to cached=true and the reinstall loop closes (review I3:
+    // repeated pulls against a source whose registry never changes must not
+    // keep reinstalling).
+    const installPath = path.join(claudeDir, 'plugins', 'cache', 'claude-plugins-official', 'existing-plugin', '1.0.0');
+    writeInstalledPlugins({
+      'existing-plugin@claude-plugins-official': [{ version: '1.0.0', installedAt: '2026-01-01T00:00:00Z', installPath }]
+    });
+    const installingExec = (cmd, args) => {
+      execCalls.push({ cmd, args });
+      // Simulate `claude plugin install` writing the plugin files back.
+      if (cmd === 'claude' && args[1] === 'install') {
+        fs.mkdirSync(installPath, { recursive: true });
+        fs.writeFileSync(path.join(installPath, 'plugin.js'), '// installed');
+      }
+      return Buffer.from('');
+    };
+    const plugins = { 'existing-plugin@claude-plugins-official': '1.0.0' };
+
+    await handlePlugins(plugins, claudeDir, { exec: installingExec });
+    expect(execCalls.filter(c => c.args[1] === 'install').length).toBe(1);
+
+    await handlePlugins(plugins, claudeDir, { exec: installingExec });
+    expect(execCalls.filter(c => c.args[1] === 'install').length).toBe(1);
+  });
+
+  it('does not reinstall on a second pull when the marketplace cannot reach the claimed version', async () => {
+    // Source registry claims 0.7.1 but this catalog can only supply 0.7.0.
+    // First pull reinstalls; the cache stays at 0.7.0 < 0.7.1, so the claim is
+    // unreachable and is recorded in the reinstall-attempts state. A second
+    // cover pull must NOT reinstall again — that would loop forever (review I1).
+    const installPath = path.join(claudeDir, 'plugins', 'cache', 'claude-hud', 'claude-hud', '0.7.1');
+    writeInstalledPlugins({
+      'claude-hud@claude-hud': [{ version: '0.7.1', installedAt: '2026-01-01T00:00:00Z', installPath }]
+    });
+    // The catalog only has 0.7.0: install writes 0.7.0, not the claimed 0.7.1.
+    const cachedV070 = path.join(claudeDir, 'plugins', 'cache', 'claude-hud', 'claude-hud', '0.7.0');
+    const installingExec = (cmd, args) => {
+      execCalls.push({ cmd, args });
+      if (cmd === 'claude' && args[1] === 'install') {
+        fs.mkdirSync(cachedV070, { recursive: true });
+        fs.writeFileSync(path.join(cachedV070, 'plugin.js'), '// installed');
+      }
+      return Buffer.from('');
+    };
+    const plugins = { 'claude-hud@claude-hud': '0.7.1' };
+
+    await handlePlugins(plugins, claudeDir, { exec: installingExec });
+    expect(execCalls.filter(c => c.args[1] === 'install').length).toBe(1);
+
+    // Second pull: the unreachable claim was recorded → skipped, no reinstall.
+    await handlePlugins(plugins, claudeDir, { exec: installingExec });
+    expect(execCalls.filter(c => c.args[1] === 'install').length).toBe(1);
+  });
+
+  it('retries a recorded-but-unreachable claim once its cooldown expires', async () => {
+    // The catalog is assumed to have caught up. A claim recorded 8 days ago
+    // (past the 7-day TTL) must be retried, not skipped forever — otherwise a
+    // plugin stays permanently behind after its marketplace moves on (review
+    // I1-1). The attempts file deliberately has no `.json` suffix so runStatus
+    // does not treat it as a tracked file.
+    const installPath = path.join(claudeDir, 'plugins', 'cache', 'claude-hud', 'claude-hud', '0.7.1');
+    writeInstalledPlugins({
+      'claude-hud@claude-hud': [{ version: '0.7.1', installedAt: '2026-01-01T00:00:00Z', installPath }]
+    });
+    const staleAt = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString();
+    fs.writeFileSync(
+      path.join(claudeDir, '.claude-sync-install-attempts'),
+      JSON.stringify({ 'claude-hud@claude-hud': { version: '0.7.1', at: staleAt } })
+    );
+    const cachedV071 = path.join(claudeDir, 'plugins', 'cache', 'claude-hud', 'claude-hud', '0.7.1');
+    const installingExec = (cmd, args) => {
+      execCalls.push({ cmd, args });
+      if (cmd === 'claude' && args[1] === 'install') {
+        fs.mkdirSync(cachedV071, { recursive: true });
+        fs.writeFileSync(path.join(cachedV071, 'plugin.js'), '// installed');
+      }
+      return Buffer.from('');
+    };
+    await handlePlugins({ 'claude-hud@claude-hud': '0.7.1' }, claudeDir, { exec: installingExec });
+    expect(execCalls.filter(c => c.args[1] === 'install').length).toBe(1);
+  });
+
+  it('treats a future-dated attempt as expired so the plugin can be retried', async () => {
+    // Clock skew or a hand-edited state file must not extend the cooldown past
+    // its TTL — a future `at` reads as expired and the reinstall proceeds
+    // (review M-c / M1).
+    const installPath = path.join(claudeDir, 'plugins', 'cache', 'claude-hud', 'claude-hud', '0.7.1');
+    writeInstalledPlugins({
+      'claude-hud@claude-hud': [{ version: '0.7.1', installedAt: '2026-01-01T00:00:00Z', installPath }]
+    });
+    const futureAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    fs.writeFileSync(
+      path.join(claudeDir, '.claude-sync-install-attempts'),
+      JSON.stringify({ 'claude-hud@claude-hud': { version: '0.7.1', at: futureAt } })
+    );
+    const cachedV071 = path.join(claudeDir, 'plugins', 'cache', 'claude-hud', 'claude-hud', '0.7.1');
+    const installingExec = (cmd, args) => {
+      execCalls.push({ cmd, args });
+      if (cmd === 'claude' && args[1] === 'install') {
+        fs.mkdirSync(cachedV071, { recursive: true });
+        fs.writeFileSync(path.join(cachedV071, 'plugin.js'), '// installed');
+      }
+      return Buffer.from('');
+    };
+    await handlePlugins({ 'claude-hud@claude-hud': '0.7.1' }, claudeDir, { exec: installingExec });
+    expect(execCalls.filter(c => c.args[1] === 'install').length).toBe(1);
+  });
+
+  it('clears a recorded unreachable claim once the plugin is genuinely installed', async () => {
+    // A manual install satisfied the claim; the stale veto must not block a
+    // future cache drop from retrying (review I1-2).
+    const installPath = path.join(claudeDir, 'plugins', 'cache', 'claude-hud', 'claude-hud', '0.7.1');
+    fs.mkdirSync(installPath, { recursive: true });
+    fs.writeFileSync(path.join(installPath, 'plugin.js'), '// installed');
+    writeInstalledPlugins({
+      'claude-hud@claude-hud': [{ version: '0.7.1', installedAt: '2026-01-01T00:00:00Z', installPath }]
+    });
+    const staleAt = new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString();
+    fs.writeFileSync(
+      path.join(claudeDir, '.claude-sync-install-attempts'),
+      JSON.stringify({ 'claude-hud@claude-hud': { version: '0.7.1', at: staleAt } })
+    );
+    await handlePlugins({ 'claude-hud@claude-hud': '0.7.1' }, claudeDir, { exec: fakeExec });
+    // present + cached → nothing to install, and the veto is gone
+    expect(execCalls).toEqual([]);
+    const attempts = JSON.parse(fs.readFileSync(path.join(claudeDir, '.claude-sync-install-attempts'), 'utf-8'));
+    expect(attempts['claude-hud@claude-hud']).toBeUndefined();
+  });
+
+  it('does not append a bare key when a legacy install made CC write the marketplace key', async () => {
+    // Real CC writes the resolved "name@marketplace" record on install. The
+    // bare-name merge must recognize it instead of appending a second, bare key
+    // — one plugin, two records, re-pushed and re-installed everywhere (review
+    // I2-1).
+    writeInstalledPlugins({});
+    const installingExec = (cmd, args) => {
+      execCalls.push({ cmd, args });
+      if (cmd === 'claude' && args[1] === 'install') {
+        writeInstalledPlugins({
+          'legacy-plugin@official': [{ version: '1.0.0', installedAt: '2026-01-01T00:00:00Z' }]
+        });
+      }
+      return Buffer.from('');
+    };
+    await handlePlugins({ 'legacy-plugin': '1.0.0' }, claudeDir, { exec: installingExec });
+    const registry = JSON.parse(fs.readFileSync(path.join(claudeDir, 'plugins', 'installed_plugins.json'), 'utf-8'));
+    expect(registry.plugins['legacy-plugin@official']).toBeDefined();
+    expect(registry.plugins['legacy-plugin']).toBeUndefined();
+  });
+
+  it('installs a legacy bare-key plugin from the default marketplace when missing', async () => {
+    // Old bundles recorded plugins as bare names (no @marketplace). CC's `@`
+    // separates plugin@marketplace, so a bare install lets CC resolve the
+    // default marketplace — restoring the pre-@key auto-install behavior that
+    // the marketplace-qualified rewrite accidentally dropped (review I2).
+    writeInstalledPlugins({});
+    await handlePlugins(
+      { 'legacy-plugin': '1.0.0' },
+      claudeDir,
+      { exec: fakeExec }
+    );
+    const cmds = execCalls.map(c => `${c.cmd} ${c.args.join(' ')}`);
+    expect(cmds).toContain('claude plugin install legacy-plugin');
+  });
+
+  it('does not install a legacy bare-key plugin that is already present', async () => {
+    const installPath = path.join(claudeDir, 'plugins', 'cache', 'legacy-plugin', 'legacy-plugin', '1.0.0');
+    fs.mkdirSync(installPath, { recursive: true });
+    fs.writeFileSync(path.join(installPath, 'plugin.js'), '// installed');
+    writeInstalledPlugins({
+      'legacy-plugin': [{ version: '1.0.0', installedAt: '2026-01-01T00:00:00Z', installPath }]
+    });
+    await handlePlugins({ 'legacy-plugin': '1.0.0' }, claudeDir, { exec: fakeExec });
+    // already present → bare-key legacy plugin is never reinstalled
+    expect(execCalls).toEqual([]);
+  });
+
+  it('does not reinstall when the registry record has no installPath (cannot verify)', async () => {
+    // Legacy/minimal records carry no installPath; without a path to check there
+    // is nothing to prove the plugin is broken, so the conservative read is to
+    // treat it as installed and keep the version-mismatch hint behavior.
+    writeInstalledPlugins({
+      'existing-plugin@claude-plugins-official': [{ version: '1.0.0', installedAt: '2026-01-01T00:00:00Z' }]
+    });
+    await handlePlugins(
+      { 'existing-plugin@claude-plugins-official': '1.0.0' },
+      claudeDir,
+      { exec: fakeExec }
+    );
+    expect(execCalls).toEqual([]);
+  });
+
+  it('strategy does not affect plugins: missing installed, existing never touched', async () => {
+    writeInstalledPlugins({
+      'existing-plugin@official': [{ version: '1.0.0', installedAt: '2026-01-01T00:00:00Z' }]
+    });
+    await handlePlugins(
+      { 'existing-plugin@official': '2.0.0', 'new-plugin@official': '1.5.0' },
+      claudeDir,
       { exec: fakeExec }
     );
 
     const cmds = execCalls.map(c => `${c.cmd} ${c.args.join(' ')}`);
-    expect(cmds).toContain('claude plugin install new-plugin@1.5.0');
-    expect(cmds).not.toContain('claude plugin install existing-plugin@2.0.0');
+    expect(cmds).toContain('claude plugin install new-plugin@official');
+    expect(cmds).not.toContain('claude plugin install existing-plugin@official');
     expect(cmds).not.toContain('claude plugin uninstall existing-plugin');
   });
 
@@ -614,17 +920,45 @@ describe('handlePlugins', () => {
     try {
       await expect(
         handlePlugins(
-          { 'missing-plugin': '1.0.0' },
+          { 'missing-plugin@official': '1.0.0' },
           claudeDir,
-          'cover',
           { exec: failingExec, scriptDir: tmpBundle }
         )
       ).resolves.toBeUndefined();
-      // fallback script written into the injected dir, not the real home
-      expect(fs.existsSync(path.join(tmpBundle, 'install-plugins.sh'))).toBe(true);
+      // fallback script written into the injected dir, not the real home,
+      // with the correct name@marketplace syntax
+      const script = fs.readFileSync(path.join(tmpBundle, 'install-plugins.sh'), 'utf-8');
+      expect(script).toContain('claude plugin install missing-plugin@official');
     } finally {
       fs.rmSync(tmpBundle, { recursive: true, force: true });
     }
+  });
+
+  it('legacy manifest: reports an already-installed plugin without reinstalling', async () => {
+    writeInstalledPlugins({
+      'existing-plugin@official': [{ version: '1.0.0', installedAt: '2026-01-01T00:00:00Z' }]
+    });
+    // Bare key (no @) = legacy manifest with no marketplace recorded
+    await handlePlugins({ 'existing-plugin': '1.0.0' }, claudeDir, { exec: fakeExec });
+    expect(execCalls).toEqual([]);
+  });
+
+  it('legacy manifest: tries a default-marketplace install for a missing plugin with no marketplace', async () => {
+    // A bare key records no marketplace, but `claude plugin install <bare>`
+    // lets CC resolve the default one (where most legacy-bundle plugins lived).
+    // Guess-and-retry beats silently skipping: the wrong/missing plugin lands in
+    // the fallback script either way, and an official plugin installs.
+    writeInstalledPlugins({});
+    await handlePlugins({ 'ghost-plugin': '1.0.0' }, claudeDir, { exec: fakeExec });
+    const cmds = execCalls.map(c => `${c.cmd} ${c.args.join(' ')}`);
+    expect(cmds).toContain('claude plugin install ghost-plugin');
+  });
+
+  it('installs scoped plugins with their marketplace', async () => {
+    writeInstalledPlugins({});
+    await handlePlugins({ '@scope/name@official': '1.0.0' }, claudeDir, { exec: fakeExec });
+    const cmds = execCalls.map(c => `${c.cmd} ${c.args.join(' ')}`);
+    expect(cmds).toContain('claude plugin install @scope/name@official');
   });
 });
 

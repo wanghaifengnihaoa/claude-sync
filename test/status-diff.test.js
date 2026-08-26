@@ -123,6 +123,35 @@ describe('status/diff summary output', () => {
     expect(output).not.toMatch(/✗/);
   });
 
+  it('runStatus ignores the reinstall-attempts state file (no .json suffix)', async () => {
+    // The reinstall-attempt state deliberately has NO `.json` suffix so
+    // runStatus's claudeDir `*.json` scan cannot flag it as a permanent
+    // "local only" difference. Without this guard the very first pull would
+    // leave status showing a difference forever (review M2: a contract the
+    // rename is the only thing enforcing).
+    fs.writeFileSync(
+      path.join(sourceHome, '.claude', '.claude-sync-install-attempts'),
+      JSON.stringify({ 'my-plugin@official': { version: '1.0.0', at: '2026-01-01T00:00:00Z' } })
+    );
+    const output = await captureLog(() => runStatus(sourceConfig, backend));
+    expect(output).toMatch(/✓/);
+    expect(output).not.toMatch(/✗/);
+    expect(output).not.toMatch(/claude-sync-install-attempts/);
+  });
+
+  it('runStatus says pull will attempt a default-marketplace install for a missing legacy bare-key plugin', async () => {
+    // Baseline manifest carries the plugin as a bare key (from the legacy flat
+    // registry in the setup). Drop the local install so it is remote-only;
+    // status must say pull attempts a default-marketplace install — not the old
+    // "manual install" wording that contradicted what pull actually does
+    // (review F1 / M-b).
+    const pluginsPath = path.join(sourceHome, '.claude', 'plugins', 'installed_plugins.json');
+    fs.writeFileSync(pluginsPath, JSON.stringify({}));
+    const output = await captureLog(() => runStatus(sourceConfig, backend));
+    expect(output).toMatch(/no marketplace — pull will attempt default-marketplace install/);
+    expect(output).toMatch(/✗/);
+  });
+
   it('runStatus prints ✗ summary with a count when a tracked file differs', async () => {
     const settingsPath = path.join(sourceHome, '.claude', 'settings.json');
     const s = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
@@ -149,5 +178,79 @@ describe('status/diff summary output', () => {
     const output = await captureLog(() => runDiff(sourceConfig, backend));
     expect(output).toMatch(/✗/);
     expect(output).toMatch(/\d+ difference/);
+  });
+
+  it('runStatus reports a plugin version mismatch with ~ and counts a difference', async () => {
+    // Baseline push left local == remote (both v1.0.0). Bump the local plugin
+    // version to flip the plugin diff into a mismatch.
+    const pluginsPath = path.join(sourceHome, '.claude', 'plugins', 'installed_plugins.json');
+    const p = JSON.parse(fs.readFileSync(pluginsPath, 'utf8'));
+    p['my-plugin'] = '2.0.0';
+    fs.writeFileSync(pluginsPath, JSON.stringify(p, null, 2));
+
+    const output = await captureLog(() => runStatus(sourceConfig, backend));
+    expect(output).toMatch(/my-plugin/);
+    expect(output).toMatch(/local v2\.0\.0 remote v1\.0\.0/);
+    expect(output).toMatch(/✗/);
+  });
+
+  it('runStatus shows CC marketplace-qualified keys and flags marketplace divergence', async () => {
+    // Rebuild the source registry in CC format so the manifest carries
+    // name@marketplace keys, then re-push.
+    const pluginsPath = path.join(sourceHome, '.claude', 'plugins', 'installed_plugins.json');
+    fs.writeFileSync(
+      pluginsPath,
+      JSON.stringify({
+        version: 2,
+        plugins: { 'my-plugin@official': [{ version: '1.0.0', installedAt: '2026-01-01T00:00:00Z' }] }
+      })
+    );
+    const pushResult = await pushWorkflow(sourceConfig, backend);
+    expect(pushResult.success).toBe(true);
+
+    // In sync: shows the full name@marketplace key.
+    let output = await captureLog(() => runStatus(sourceConfig, backend));
+    expect(output).toMatch(/my-plugin@official v1\.0\.0/);
+    expect(output).toMatch(/✓/);
+    expect(output).not.toMatch(/✗/);
+
+    // Flip the local install to a DIFFERENT marketplace at the SAME version —
+    // status must flag the divergence instead of claiming "in sync" (the same
+    // divergence pull hints at).
+    const p = JSON.parse(fs.readFileSync(pluginsPath, 'utf8'));
+    p.plugins['my-plugin@community'] = [{ version: '1.0.0', installedAt: '2026-01-01T00:00:00Z' }];
+    delete p.plugins['my-plugin@official'];
+    fs.writeFileSync(pluginsPath, JSON.stringify(p, null, 2));
+
+    output = await captureLog(() => runStatus(sourceConfig, backend));
+    expect(output).toMatch(/same version, different\/no marketplace/);
+    expect(output).toMatch(/✗/);
+  });
+
+  it('runStatus and runDiff flag a plugin recorded but whose cached files are missing', async () => {
+    // Rebuild the registry in CC format with an installPath that does not exist
+    // (a restore dropped the cache dir), then re-push so the manifest records it.
+    const pluginsPath = path.join(sourceHome, '.claude', 'plugins', 'installed_plugins.json');
+    const missing = path.join(sourceHome, '.claude', 'plugins', 'cache', 'my-plugin', '1.0.0');
+    fs.writeFileSync(
+      pluginsPath,
+      JSON.stringify({
+        version: 2,
+        plugins: { 'my-plugin@official': [{ version: '1.0.0', installedAt: '2026-01-01T00:00:00Z', installPath: missing }] }
+      })
+    );
+    const pushResult = await pushWorkflow(sourceConfig, backend);
+    expect(pushResult.success).toBe(true);
+
+    // status must not claim "in sync" — the plugin is recorded but unusable.
+    let output = await captureLog(() => runStatus(sourceConfig, backend));
+    expect(output).toMatch(/my-plugin@official/);
+    expect(output).toMatch(/cache missing \(pull will attempt reinstall\)/);
+    expect(output).toMatch(/✗/);
+
+    // diff surfaces the same divergence with the pull remedy.
+    output = await captureLog(() => runDiff(sourceConfig, backend));
+    expect(output).toMatch(/cache missing \(pull will attempt reinstall\)/);
+    expect(output).toMatch(/✗/);
   });
 });

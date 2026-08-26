@@ -62,12 +62,19 @@ describe('End-to-end push/pull cycle', () => {
       `# ${sourceUser}'s CLAUDE.md\n\nCustom instructions here.\nReference: /Users/${sourceUser}/projects/foo`
     );
 
-    // Plugins
+    // Plugins — CC format (name@marketplace keys) so the marketplace survives
+    // into the manifest and pull installs from the right source.
     const pluginsDir = path.join(sourceClaude, 'plugins');
     fs.mkdirSync(pluginsDir, { recursive: true });
     fs.writeFileSync(
       path.join(pluginsDir, 'installed_plugins.json'),
-      JSON.stringify({ 'my-plugin': '1.0.0', 'another-plugin': '2.3.1' })
+      JSON.stringify({
+        version: 2,
+        plugins: {
+          'my-plugin@official': [{ version: '1.0.0', installedAt: '2026-01-01T00:00:00Z' }],
+          'another-plugin@official': [{ version: '2.3.1', installedAt: '2026-01-01T00:00:00Z' }]
+        }
+      })
     );
     fs.writeFileSync(
       path.join(pluginsDir, 'known_marketplaces.json'),
@@ -145,8 +152,8 @@ describe('End-to-end push/pull cycle', () => {
     // Verify manifest content
     const manifest = readManifest(path.join(bundleDir, 'manifest.json'));
     expect(manifest.version).toBe(1);
-    expect(manifest.plugins['my-plugin']).toBe('1.0.0');
-    expect(manifest.plugins['another-plugin']).toBe('2.3.1');
+    expect(manifest.plugins['my-plugin@official']).toBe('1.0.0');
+    expect(manifest.plugins['another-plugin@official']).toBe('2.3.1');
     expect(manifest.skills.plain).toHaveLength(1);
     expect(manifest.skills.git).toHaveLength(1);
     expect(manifest.skills.plain[0].name).toBe('my-custom-skill');
@@ -217,12 +224,12 @@ describe('End-to-end push/pull cycle', () => {
     const targetCommands = path.join(targetHome, '.claude', 'commands');
     expect(fs.existsSync(path.join(targetCommands, 'deploy.md'))).toBe(true);
 
-    // 6. Plugins registry restored
+    // 6. Plugins registry restored (CC format with name@marketplace keys)
     const targetPlugins = JSON.parse(
       fs.readFileSync(path.join(targetHome, '.claude', 'plugins', 'installed_plugins.json'), 'utf-8')
     );
-    expect(targetPlugins['my-plugin']).toBe('1.0.0');
-    expect(targetPlugins['another-plugin']).toBe('2.3.1');
+    expect(targetPlugins.plugins['my-plugin@official'][0].version).toBe('1.0.0');
+    expect(targetPlugins.plugins['another-plugin@official'][0].version).toBe('2.3.1');
 
     // 6b. known_marketplaces.json restored
     const targetMarketplaces = JSON.parse(
@@ -236,6 +243,60 @@ describe('End-to-end push/pull cycle', () => {
     // 8. Pull state recorded
     const stateFile = path.join(os.homedir(), '.claude-sync-bundle', 'state.json');
     // (state file may exist if this isn't the first pull on this machine)
+  });
+
+  it('pull installs manifest plugins missing on the target with name@marketplace syntax', async () => {
+    // === PUSH from source ===
+    const sourceConfig = readConfig({
+      BACKEND: 'manual',
+      BUNDLE_DIR: bundleDir,
+      CLAUDE_DIR: path.join(sourceHome, '.claude'), HOME: sourceHome,
+      MACHINE_ID: 'source-mac',
+      SECRETS: 'keep'
+    });
+    const pushResult = await pushWorkflow(sourceConfig, createManualBackend({ bundleDir }));
+    expect(pushResult.success).toBe(true);
+
+    // Make the manifest record a plugin that is NOT in the bundle (e.g. a plugin
+    // installed on the source after this push). The target then genuinely lacks
+    // it even after the bundle is restored, forcing handlePlugins down the
+    // install branch — the path the cover-strategy happy-path never exercises.
+    const manifestPath = path.join(bundleDir, 'manifest.json');
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+    manifest.plugins['ghost-plugin@official'] = '0.9.0';
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+
+    // === PULL to a fresh target with an injected claude shim ===
+    const targetConfig = readConfig({
+      BACKEND: 'manual',
+      BUNDLE_DIR: bundleDir,
+      CLAUDE_DIR: path.join(targetHome, '.claude'), HOME: targetHome,
+      MACHINE_ID: 'target-mac',
+      SECRETS: 'keep'
+    });
+    fs.mkdirSync(path.join(targetHome, '.claude'), { recursive: true });
+
+    const execCalls = [];
+    const fakeExec = (cmd, args) => { execCalls.push({ cmd, args }); return Buffer.from(''); };
+    const tmpScript = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-sync-script-'));
+    try {
+      const pullResult = await pullWorkflow(targetConfig, createManualBackend({ bundleDir }), {
+        strategy: 'cover',
+        pluginExec: fakeExec,
+        pluginScriptDir: tmpScript
+      });
+      expect(pullResult.success).toBe(true);
+
+      const cmds = execCalls.map(c => `${c.cmd} ${c.args.join(' ')}`);
+      // missing plugin → installed from its marketplace (name@marketplace, never name@version)
+      expect(cmds).toContain('claude plugin install ghost-plugin@official');
+      expect(cmds).not.toContain('claude plugin install ghost-plugin@0.9.0');
+      // plugins already present in the bundle registry → left alone (no reinstall)
+      expect(cmds).not.toContain('claude plugin install my-plugin@official');
+      expect(cmds).not.toContain('claude plugin install another-plugin@official');
+    } finally {
+      fs.rmSync(tmpScript, { recursive: true, force: true });
+    }
   });
 
   it('pull with --keep strategy only adds missing fields', async () => {
